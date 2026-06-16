@@ -15,7 +15,8 @@ const TokenTransfer = require('../transfer/TokenTransfer');
 const AutoTokenDetectionManager = require('../transfer/AutoTokenDetectionManager');
 const ModernUI = require('../core/ModernUI');
 const morse = require('../utils/morse');
-const morseMap = morse.parseMorseFile();
+const morseMap = morse.parseMorseFile();         // legacy: untuk dekripsi pesan lama
+const allMorseCiphers = morse.getAllCiphers();    // baru: 273 versi cipher per-char random
 const morseStorage = require('../utils/morseStorage');
 const ui = new ModernUI();
 
@@ -112,8 +113,17 @@ class TelegramFullController {
             if (!fs.existsSync(envPath)) {
                 return { ok: false, msg: 'File .env tidak ditemukan.' };
             }
+            
+            // Menggunakan hash live aktif proyek agar enkripsi sinkron dengan loadConfiguration
+            const integrityGuard = require('../core/integrityGuard');
+            const liveHash = integrityGuard.calculateProjectHash();
+            
             const configKey = crypto.pbkdf2Sync(
-                'FASTARX_CONFIG_KEY_2024', 'CONFIG_SALT_2024', 50000, 32, 'sha256'
+                'FASTARX_CONFIG_KEY_2024' + liveHash,
+                'CONFIG_SALT_2024',
+                50000,
+                32,
+                'sha256'
             );
             const iv = crypto.randomBytes(16);
             const cipher = crypto.createCipheriv('aes-256-cbc', configKey, iv);
@@ -691,8 +701,14 @@ class TelegramFullController {
             ? '🔐 DApp Approval: 🟢 ON (klik untuk OFF)'
             : '🔐 DApp Approval: 🔴 OFF (klik untuk ON)';
 
+        const timeout = cryptoApp.dappInactivityTimeout !== undefined ? cryptoApp.dappInactivityTimeout : 30;
+        const timerLabel = timeout === 0
+            ? '⏱️ Auto-Disconnect: 🔴 OFF (klik untuk ON)'
+            : `⏱️ Auto-Disconnect: 🟢 ${timeout} Menit (klik untuk ubah)`;
+
         const keyboard = [
-            [{ text: dappApprovalLabel, callback_data: 'dapp_approval_toggle_new' }]
+            [{ text: dappApprovalLabel, callback_data: 'dapp_approval_toggle_new' }],
+            [{ text: timerLabel, callback_data: 'dapp_timer_settings' }]
         ];
 
         const escapeMarkdown = (text) => {
@@ -733,6 +749,33 @@ class TelegramFullController {
             `Pilih aksi di bawah:`,
             { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } }
         );
+    }
+
+    async processDappTimerInput(cryptoApp, chatId, text, msg) {
+        try {
+            await this.bot.deleteMessage(chatId, msg.message_id);
+        } catch (e) {}
+
+        const minutes = parseInt(text.trim());
+        if (isNaN(minutes) || minutes < 0 || minutes > 1440) {
+            await this.bot.sendMessage(chatId,
+                `❌ *Input tidak valid!*\n\n` +
+                `Silakan masukkan angka menit antara \`0\` sampai \`1440\`.`,
+                { parse_mode: 'Markdown' }
+            );
+            return;
+        }
+
+        cryptoApp.dappInactivityTimeout = minutes;
+        cryptoApp.saveRpcConfig();
+        this.userStates.delete(chatId);
+
+        const statusText = minutes === 0
+            ? '❌ *Auto-Disconnect dinonaktifkan.*'
+            : `✅ *Auto-Disconnect diset ke ${minutes} menit.*`;
+
+        await this.bot.sendMessage(chatId, statusText, { parse_mode: 'Markdown' });
+        this.showDappsMenu(chatId);
     }
 
     async startTransferSetup(chatId, mode) {
@@ -3473,6 +3516,9 @@ class TelegramFullController {
             case 'morse_awaiting_view_password':
                 await this.processMorseViewPassword(chatId, text, userState, msg);
                 break;
+            case 'awaiting_dapp_timer_input':
+                await this.processDappTimerInput(cryptoApp, chatId, text, msg);
+                break;
         }
     }
 
@@ -3809,6 +3855,30 @@ class TelegramFullController {
                     await this.bot.deleteMessage(chatId, query.message.message_id);
                 } catch (e) {}
                 this.showDappsMenu(chatId);
+            }
+            else if (data === 'dapp_timer_settings') {
+                const cryptoApp = this.userSessions.get(chatId);
+                if (!cryptoApp) {
+                    await this.bot.answerCallbackQuery(query.id, {
+                        text: '❌ Sesi tidak ditemukan. Silakan /start ulang.',
+                        show_alert: true
+                    });
+                    return;
+                }
+
+                await this.bot.answerCallbackQuery(query.id);
+
+                this.userStates.set(chatId, {
+                    action: 'awaiting_dapp_timer_input'
+                });
+
+                await this.bot.sendMessage(chatId,
+                    `⏱️ *Timer Auto-Disconnect DApp*\n\n` +
+                    `Saat ini: *${cryptoApp.dappInactivityTimeout !== 0 ? cryptoApp.dappInactivityTimeout + ' menit' : 'OFF (Tidak aktif)'}*\n\n` +
+                    `Ketik waktu tunggu dalam menit yang Anda inginkan (1-1440):\n` +
+                    `Ketik \`0\` jika ingin menonaktifkan fitur auto-disconnect ini.`,
+                    { parse_mode: 'Markdown' }
+                );
             }
             // [v19.2] DApp Connect Approve/Reject callbacks
             else if (data.startsWith('dapp_connect_approve_') || data.startsWith('dapp_connect_reject_')) {
@@ -4332,7 +4402,7 @@ class TelegramFullController {
             return;
         }
 
-        const encryptedText = morse.encrypt(text, morseMap);
+        const encryptedText = morse.encryptMultiCipher(text, allMorseCiphers);
         
         // Save temporary state for save prompt (originalText TIDAK disimpan untuk keamanan)
         this.userStates.set(chatId, {
@@ -4374,7 +4444,11 @@ class TelegramFullController {
             return;
         }
 
-        const decryptedText = morse.decrypt(text, morseMap);
+        // Coba multi-cipher dulu, fallback ke legacy jika hasil kosong
+        let decryptedText = morse.decryptMultiCipher(text, allMorseCiphers);
+        if (!decryptedText || decryptedText.trim() === '') {
+            decryptedText = morse.decrypt(text, morseMap);
+        }
         this.userStates.delete(chatId);
 
         const responseMessage =
@@ -4617,7 +4691,7 @@ class TelegramFullController {
             this.userStates.delete(chatId);
 
             if (actionType === 'encrypt') {
-                const encryptedMorse = morse.encryptFile(fileContent, morseMap);
+                const encryptedMorse = morse.encryptFileMultiCipher(fileContent, allMorseCiphers);
                 const outputBuffer = Buffer.from(encryptedMorse, 'utf-8');
 
                 try { await this.bot.deleteMessage(chatId, statusMsg.message_id); } catch (e) { }
@@ -4656,7 +4730,11 @@ class TelegramFullController {
                     reply_markup: { inline_keyboard: keyboard }
                 });
             } else {
-                const decryptedText = morse.decryptFile(fileContent, morseMap);
+                // Coba multi-cipher dulu, fallback ke legacy jika hasil kosong
+                let decryptedText = morse.decryptFileMultiCipher(fileContent, allMorseCiphers);
+                if (!decryptedText || decryptedText.trim() === '') {
+                    decryptedText = morse.decryptFile(fileContent, morseMap);
+                }
                 const outputBuffer = Buffer.from(decryptedText, 'utf-8');
 
                 try { await this.bot.deleteMessage(chatId, statusMsg.message_id); } catch (e) { }

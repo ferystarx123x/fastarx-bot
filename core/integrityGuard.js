@@ -1,0 +1,563 @@
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const readline = require('readline');
+
+const PROTECTED_DIRS = [
+    'bot',
+    'utils',
+    'core',
+    'transfer',
+    'config',
+    'modes',
+    'auth',
+    'rpc'
+];
+const PROTECTED_FILES = [
+    'main.js',
+    'control.js',
+    'setup.js',
+    'package.json',
+    'package-lock.json',
+    '.security-system-marker',
+    '.secure-backup-marker',
+    '.fastarx-ultra-secure',
+    '.permanent-security',
+    '.admin-password-secure',
+    '.github-validation-lock',
+    '.dual-backup-evidence'
+];
+
+class IntegrityGuard {
+    constructor() {
+        this.projectRoot = path.join(__dirname, '..');
+        this.lockFilePath = path.join(this.projectRoot, '.integrity.lock');
+        this.backupFilePath = path.join(this.projectRoot, '.system-integrity-check');
+        this.envPath = path.join(this.projectRoot, '.env');
+    }
+
+    calculateProjectHash() {
+        const fileHashes = [];
+
+        for (const dirName of PROTECTED_DIRS) {
+            const dirPath = path.join(this.projectRoot, dirName);
+            if (fs.existsSync(dirPath)) {
+                this._scanDirectoryRecursive(dirPath, fileHashes);
+            }
+        }
+
+        for (const fileName of PROTECTED_FILES) {
+            const filePath = path.join(this.projectRoot, fileName);
+            if (fs.existsSync(filePath)) {
+                const content = fs.readFileSync(filePath);
+                const hash = crypto.createHash('sha256').update(content).digest('hex');
+                const relPath = path.relative(this.projectRoot, filePath);
+                fileHashes.push({ path: relPath, hash });
+            }
+        }
+
+        fileHashes.sort((a, b) => a.path.localeCompare(b.path));
+
+        const hasher = crypto.createHash('sha256');
+        for (const item of fileHashes) {
+            hasher.update(`${item.path}:${item.hash}`);
+        }
+        return hasher.digest('hex');
+    }
+
+    _scanDirectoryRecursive(dirPath, fileHashes) {
+        const items = fs.readdirSync(dirPath);
+        for (const item of items) {
+            const fullPath = path.join(dirPath, item);
+            const stat = fs.statSync(fullPath);
+
+            if (stat.isDirectory()) {
+                if (item !== 'node_modules' && item !== 'temp' && !item.startsWith('.')) {
+                    this._scanDirectoryRecursive(fullPath, fileHashes);
+                }
+            } else if (stat.isFile() && (
+                item.endsWith('.js') ||
+                item.endsWith('.json') ||
+                item.endsWith('.cjs') ||
+                item.endsWith('.mjs')
+            )) {
+                const content = fs.readFileSync(fullPath);
+                const hash = crypto.createHash('sha256').update(content).digest('hex');
+                const relPath = path.relative(this.projectRoot, fullPath);
+                fileHashes.push({ path: relPath, hash });
+            }
+        }
+    }
+
+    getApprovedHash() {
+        if (fs.existsSync(this.lockFilePath)) {
+            try {
+                const data = JSON.parse(fs.readFileSync(this.lockFilePath, 'utf8'));
+                if (data && data.approvedHash) {
+                    return data.approvedHash;
+                }
+            } catch (e) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    _loadEncryptionSalt(approvedHash) {
+        if (!fs.existsSync(this.envPath)) return null;
+        try {
+            const configKey = crypto.pbkdf2Sync(
+                'FASTARX_CONFIG_KEY_2024' + approvedHash,
+                'CONFIG_SALT_2024',
+                50000,
+                32,
+                'sha256'
+            );
+            const envContent = fs.readFileSync(this.envPath, 'utf8');
+            const match = envContent.match(/^ENCRYPTION_SALT_ENCRYPTED\s*=\s*["']?([^"'\r\n]+)["']?/m);
+            if (!match) return null;
+
+            const encryptedValue = match[1];
+            const parts = encryptedValue.split(':');
+            if (parts.length !== 2) return null;
+
+            const encryptedData = parts[0];
+            const iv = Buffer.from(parts[1], 'hex');
+            const decipher = crypto.createDecipheriv('aes-256-cbc', configKey, iv);
+            let decrypted = decipher.update(encryptedData, 'base64', 'utf8');
+            decrypted += decipher.final('utf8');
+            return decrypted;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _loadAdminPasswordFromMarker(approvedHash) {
+        const adminSecureFile = path.join(this.projectRoot, '.admin-password-secure');
+        if (!fs.existsSync(adminSecureFile)) return null;
+
+        try {
+            const fileContent = JSON.parse(fs.readFileSync(adminSecureFile, 'utf8'));
+            const systemId = process.env.SYSTEM_ID;
+            if (!systemId) return null;
+
+            const salt = this._loadEncryptionSalt(approvedHash);
+            if (!salt) return null;
+
+            const key = crypto.pbkdf2Sync(
+                'FASTARX_SECURE_MASTER_KEY_2024',
+                salt,
+                100000,
+                32,
+                'sha256'
+            );
+
+            const iv = Buffer.from(fileContent.iv, 'hex');
+            const authTag = Buffer.from(fileContent.authTag, 'hex');
+            const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+            decipher.setAuthTag(authTag);
+
+            let decrypted = decipher.update(fileContent.encrypted, 'hex', 'utf8');
+            decrypted += decipher.final('utf8');
+
+            const data = JSON.parse(decrypted);
+            return data.password;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    async _promptPassword(promptText) {
+        return new Promise((resolve) => {
+            const rl = readline.createInterface({
+                input: process.stdin,
+                output: process.stdout
+            });
+
+            const stdin = process.openStdin();
+            const onDataHandler = (char) => {
+                char = char + '';
+                switch (char) {
+                    case '\n':
+                    case '\r':
+                    case '\u0004':
+                        stdin.removeListener('data', onDataHandler);
+                        break;
+                    default:
+                        process.stdout.write('\x1B[2K\x1B[0G' + promptText + '*'.repeat(rl.line.length));
+                        break;
+                }
+            };
+            process.stdin.on('data', onDataHandler);
+
+            rl.question(promptText, (answer) => {
+                rl.close();
+                console.log('');
+                resolve(answer.trim());
+            });
+        });
+    }
+
+    async _promptOTP(promptText) {
+        return new Promise((resolve) => {
+            const rl = readline.createInterface({
+                input: process.stdin,
+                output: process.stdout
+            });
+            rl.question(promptText, (answer) => {
+                rl.close();
+                resolve(answer.trim());
+            });
+        });
+    }
+
+    // Implementasi TOTP inline (RFC 6238) — tidak memerlukan library eksternal
+    _base32DecodeInline(base32) {
+        const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+        let bits = 0, value = 0;
+        const output = [];
+        const input = base32.replace(/=+$/, '').toUpperCase();
+        for (const char of input) {
+            const idx = alphabet.indexOf(char);
+            if (idx === -1) continue;
+            value = (value << 5) | idx;
+            bits += 5;
+            if (bits >= 8) { output.push((value >>> (bits - 8)) & 0xff); bits -= 8; }
+        }
+        return Buffer.from(output);
+    }
+
+    _verifyOTPInline(secret, token, window = 1) {
+        try {
+            const timeStep = 30;
+            const counter = Math.floor(Date.now() / 1000 / timeStep);
+            const key = this._base32DecodeInline(secret);
+            for (let delta = -window; delta <= window; delta++) {
+                const c = counter + delta;
+                const buf = Buffer.alloc(8);
+                let tmp = c;
+                for (let i = 7; i >= 0; i--) { buf[i] = tmp & 0xff; tmp = Math.floor(tmp / 256); }
+                const hmac = crypto.createHmac('sha1', key).update(buf).digest();
+                const offset = hmac[hmac.length - 1] & 0x0f;
+                const code = (
+                    ((hmac[offset] & 0x7f) << 24) |
+                    (hmac[offset + 1] << 16) |
+                    (hmac[offset + 2] << 8) |
+                    hmac[offset + 3]
+                ) % 1000000;
+                if (code.toString().padStart(6, '0') === token.toString()) return true;
+            }
+        } catch (e) { }
+        return false;
+    }
+
+    _readSetup2FASecret(approvedHash) {
+        if (!fs.existsSync(this.envPath)) return null;
+        try {
+            const envContent = fs.readFileSync(this.envPath, 'utf8');
+            const match = envContent.match(/^SETUP_2FA_SECRET_ENCRYPTED\s*=\s*["']?([^"'\r\n]+)["']?/m);
+            if (!match) return null;
+            const configKey = crypto.pbkdf2Sync(
+                'FASTARX_CONFIG_KEY_2024' + approvedHash,
+                'CONFIG_SALT_2024', 50000, 32, 'sha256'
+            );
+            const parts = match[1].split(':');
+            if (parts.length !== 2) return null;
+            const decipher = crypto.createDecipheriv('aes-256-cbc', configKey, Buffer.from(parts[1], 'hex'));
+            let decrypted = decipher.update(parts[0], 'base64', 'utf8');
+            decrypted += decipher.final('utf8');
+            return decrypted;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _readSetup2FASecretStatic() {
+        if (!fs.existsSync(this.envPath)) return null;
+        try {
+            const envContent = fs.readFileSync(this.envPath, 'utf8');
+            const match = envContent.match(/^SETUP_2FA_SECRET_ENCRYPTED\s*=\s*["']?([^"'\r\n]+)["']?/m);
+            if (!match) return null;
+            const staticKey = crypto.pbkdf2Sync(
+                'FASTARX_CONFIG_KEY_2024',
+                'CONFIG_SALT_2024',
+                50000,
+                32,
+                'sha256'
+            );
+            const parts = match[1].split(':');
+            if (parts.length !== 2) return null;
+            const decipher = crypto.createDecipheriv('aes-256-cbc', staticKey, Buffer.from(parts[1], 'hex'));
+            let decrypted = decipher.update(parts[0], 'base64', 'utf8');
+            decrypted += decipher.final('utf8');
+            return decrypted;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    /**
+     * Memulihkan sistem jika file lock hilang
+     */
+    async attemptRecovery() {
+        console.log('\n⚠️  PERINGATAN KEAMANAN: File kunci integritas (.integrity.lock) tidak ditemukan!');
+        console.log('Sistem mendeteksi kemungkinan penghapusan file secara tidak sah.');
+
+        if (!fs.existsSync(this.backupFilePath)) {
+            console.error('❌ ERROR: Cadangan integritas (.system-integrity-check) hilang. Sistem terkunci secara permanen.');
+            process.exit(1);
+        }
+
+        const input = await this._promptPassword('🔑 Masukkan Password Admin untuk memulihkan sistem: ');
+
+        let backupHash = null;
+        try {
+            const backupData = JSON.parse(fs.readFileSync(this.backupFilePath, 'utf8'));
+            const key = crypto.pbkdf2Sync(input, 'INTEGRITY_RECOVERY_SALT', 50000, 32, 'sha256');
+            const iv = Buffer.from(backupData.iv, 'hex');
+            const authTag = Buffer.from(backupData.authTag, 'hex');
+            const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+            decipher.setAuthTag(authTag);
+            let decrypted = decipher.update(backupData.encrypted, 'hex', 'utf8');
+            decrypted += decipher.final('utf8');
+            const parsed = JSON.parse(decrypted);
+            backupHash = parsed.approvedHash;
+        } catch (e) {
+            console.error('❌ ACCESS DENIED: Password salah atau file backup rusak! Bot ditutup.');
+            process.exit(1);
+        }
+
+        if (!backupHash) {
+            console.error('❌ ERROR: Cadangan integritas tidak valid. Sistem terkunci secara permanen.');
+            process.exit(1);
+        }
+
+        fs.writeFileSync(this.lockFilePath, JSON.stringify({
+            approvedHash: backupHash,
+            updatedAt: new Date().toISOString(),
+            recovered: true
+        }, null, 2));
+
+        console.log('✅ Sistem berhasil dipulihkan dari cadangan aman!');
+        return backupHash;
+    }
+
+    saveNewApprovedHash(hash, adminPassword) {
+        fs.writeFileSync(this.lockFilePath, JSON.stringify({
+            approvedHash: hash,
+            updatedAt: new Date().toISOString()
+        }, null, 2));
+
+        try {
+            const key = crypto.pbkdf2Sync(adminPassword, 'INTEGRITY_RECOVERY_SALT', 50000, 32, 'sha256');
+            const iv = crypto.randomBytes(12);
+            const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+            const plaintext = JSON.stringify({ approvedHash: hash, timestamp: new Date().toISOString() });
+            let encrypted = cipher.update(plaintext, 'utf8', 'hex');
+            encrypted += cipher.final('hex');
+            const authTag = cipher.getAuthTag();
+
+            fs.writeFileSync(this.backupFilePath, JSON.stringify({
+                encrypted,
+                iv: iv.toString('hex'),
+                authTag: authTag.toString('hex')
+            }, null, 2));
+        } catch (e) {
+            console.warn('⚠️ Gagal menulis file backup integritas:', e.message);
+        }
+    }
+
+    reencryptEnv(oldHash, newHash, adminPassword) {
+        if (!fs.existsSync(this.envPath)) {
+            throw new Error('File .env tidak ditemukan.');
+        }
+
+        const oldConfigKey = crypto.pbkdf2Sync(
+            'FASTARX_CONFIG_KEY_2024' + oldHash,
+            'CONFIG_SALT_2024',
+            50000,
+            32,
+            'sha256'
+        );
+
+        const newConfigKey = crypto.pbkdf2Sync(
+            'FASTARX_CONFIG_KEY_2024' + newHash,
+            'CONFIG_SALT_2024',
+            50000,
+            32,
+            'sha256'
+        );
+
+        let envContent = fs.readFileSync(this.envPath, 'utf8');
+        const lines = envContent.split(/\r?\n/);
+        const updatedLines = lines.map(line => {
+            if (!line || line.startsWith('#') || !line.includes('=')) {
+                return line;
+            }
+
+            const eqIndex = line.indexOf('=');
+            const key = line.substring(0, eqIndex).trim();
+            const value = line.substring(eqIndex + 1).trim();
+
+            if (key.endsWith('_ENCRYPTED') && value) {
+                try {
+                    const cleanValue = value.replace(/^["']|["']$/g, '');
+                    const parts = cleanValue.split(':');
+                    if (parts.length === 2) {
+                        const encryptedData = parts[0];
+                        const iv = Buffer.from(parts[1], 'hex');
+                        const decipher = crypto.createDecipheriv('aes-256-cbc', oldConfigKey, iv);
+                        let decrypted = decipher.update(encryptedData, 'base64', 'utf8');
+                        decrypted += decipher.final('utf8');
+
+                        const newIv = crypto.randomBytes(16);
+                        const cipher = crypto.createCipheriv('aes-256-cbc', newConfigKey, newIv);
+                        let encrypted = cipher.update(decrypted, 'utf8', 'base64');
+                        encrypted += cipher.final('base64');
+
+                        return `${key}="${encrypted}:${newIv.toString('hex')}"`;
+                    }
+                } catch (e) {
+                    console.error(`❌ Gagal re-enkripsi key: ${key}. Error: ${e.message}`);
+                }
+            }
+            return line;
+        });
+
+        fs.writeFileSync(this.envPath, updatedLines.join('\n'), 'utf8');
+        console.log('📝 File .env telah berhasil di-re-enkripsi ke signature baru.');
+    }
+
+    /**
+     * Memeriksa apakah file .env saat ini dienkripsi dengan kunci statis bawaan setup.js.
+     * Mengembalikan password admin jika berhasil didekripsi.
+     */
+    _tryDecryptWithStaticKey() {
+        if (!fs.existsSync(this.envPath)) return null;
+        try {
+            const staticKey = crypto.pbkdf2Sync(
+                'FASTARX_CONFIG_KEY_2024',
+                'CONFIG_SALT_2024',
+                50000,
+                32,
+                'sha256'
+            );
+            const envContent = fs.readFileSync(this.envPath, 'utf8');
+            const match = envContent.match(/^ADMIN_PASSWORD_ENCRYPTED\s*=\s*["']?([^"'\r\n]+)["']?/m);
+            if (!match) return null;
+
+            const parts = match[1].split(':');
+            if (parts.length !== 2) return null;
+
+            const decipher = crypto.createDecipheriv('aes-256-cbc', staticKey, Buffer.from(parts[1], 'hex'));
+            let decrypted = decipher.update(parts[0], 'base64', 'utf8');
+            decrypted += decipher.final('utf8');
+            return decrypted;
+        } catch (e) {
+            // Gagal dekripsi berarti .env tidak pakai kunci statis (sudah diikat hash)
+            return null;
+        }
+    }
+
+    async verify() {
+        const currentHash = this.calculateProjectHash();
+
+        // Cek deteksi pasca-setup: Apakah .env menggunakan kunci statis bawaan setup.js?
+        const staticAdminPassword = this._tryDecryptWithStaticKey();
+        if (staticAdminPassword) {
+            console.log('\n🔄 Deteksi perubahan konfigurasi dari setup.js! Memerlukan verifikasi OTP...');
+
+            const setup2FASecret = this._readSetup2FASecretStatic();
+            if (setup2FASecret) {
+                console.log('\x1b[38;5;51m📱 Buka Google Authenticator → [Fastarx Bot - Setup]\x1b[0m');
+                const otpInput = await this._promptOTP('\x1b[38;5;141m🔑 Masukkan kode 6 digit OTP untuk mengonfirmasi perubahan .env: \x1b[0m');
+                if (!this._verifyOTPInline(setup2FASecret, otpInput)) {
+                    console.error('\x1b[38;5;203m❌ ACCESS DENIED: Kode OTP salah! Perubahan .env dibatalkan.\x1b[0m');
+                    process.exit(1);
+                }
+            } else {
+                console.log('\x1b[38;5;214m⚠️  Setup-2FA belum dikonfigurasi. Menggunakan Password Admin untuk konfirmasi...\x1b[0m');
+                const input = await this._promptPassword('🔑 Masukkan Password Admin untuk mengonfirmasi perubahan .env: ');
+                if (input !== staticAdminPassword) {
+                    console.error('❌ ACCESS DENIED: Password salah! Perubahan .env dibatalkan.');
+                    process.exit(1);
+                }
+            }
+
+            try {
+                // Re-enkripsi dari static key (hash kosong) ke currentHash
+                this.reencryptEnv('', currentHash, staticAdminPassword);
+                this.saveNewApprovedHash(currentHash, staticAdminPassword);
+                console.log('✅ Perubahan konfigurasi berhasil diverifikasi dan diamankan!');
+                return;
+            } catch (err) {
+                console.error('❌ Gagal memproses data setup baru:', err.message);
+                process.exit(1);
+            }
+        }
+
+        let approvedHash = this.getApprovedHash();
+
+        if (!approvedHash) {
+            if (fs.existsSync(this.envPath)) {
+                approvedHash = await this.attemptRecovery();
+            } else {
+                console.log('🆕 Setup awal sistem integritas...');
+                const defaultAdminPassword = 'admin';
+                this.saveNewApprovedHash(currentHash, defaultAdminPassword);
+                return;
+            }
+        }
+
+        if (currentHash !== approvedHash) {
+            console.log('\n\x1b[38;5;214m⚠️  PERINGATAN KEAMANAN: Modifikasi file atau file baru terdeteksi!\x1b[0m');
+
+            // Coba baca Setup-2FA secret dari .env
+            const setup2FASecret = this._readSetup2FASecret(approvedHash);
+
+            let verified = false;
+
+            if (setup2FASecret) {
+                // .env baru — verifikasi dengan OTP
+                console.log('\x1b[38;5;51m📱 Buka Google Authenticator → [Fastarx Bot - Setup]\x1b[0m');
+                const otpInput = await this._promptOTP('\x1b[38;5;141m🔑 Masukkan kode 6 digit OTP: \x1b[0m');
+                if (!this._verifyOTPInline(setup2FASecret, otpInput)) {
+                    console.error('\x1b[38;5;203m❌ ACCESS DENIED: Kode OTP salah! Bot ditutup.\x1b[0m');
+                    process.exit(1);
+                }
+                verified = true;
+            } else {
+                // .env lama — fallback ke Password Admin
+                console.log('\x1b[38;5;214m⚠️  Setup-2FA belum dikonfigurasi. Menggunakan Password Admin (mode lama).\x1b[0m');
+                const adminPassword = this._loadAdminPasswordFromMarker(approvedHash);
+                if (!adminPassword) {
+                    console.error('❌ ERROR: Master password tidak dapat dimuat. Bot dikunci.');
+                    process.exit(1);
+                }
+                const input = await this._promptPassword('🔑 Masukkan Password Admin untuk menyetujui perubahan: ');
+                if (input !== adminPassword) {
+                    console.error('❌ ACCESS DENIED: Password salah! Bot ditutup.');
+                    process.exit(1);
+                }
+                verified = true;
+            }
+
+            if (verified) {
+                console.log('🔄 Memproses pembaruan kode...');
+                try {
+                    const adminPassword = this._loadAdminPasswordFromMarker(approvedHash);
+                    this.reencryptEnv(approvedHash, currentHash, adminPassword || 'SETUP_2FA_VERIFIED');
+                    this.saveNewApprovedHash(currentHash, adminPassword || 'SETUP_2FA_VERIFIED');
+                    console.log('\x1b[38;5;46m✅ Perubahan berhasil diverifikasi dan ditandatangani!\x1b[0m');
+                } catch (err) {
+                    console.error('❌ Gagal memproses update:', err.message);
+                    process.exit(1);
+                }
+            }
+        }
+    }
+}
+
+module.exports = new IntegrityGuard();

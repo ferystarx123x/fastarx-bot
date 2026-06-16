@@ -23,6 +23,7 @@ const { loadConfiguration } = require('./config/loadConfiguration');
 const ModernUI = require('./core/ModernUI');
 const TelegramFullController = require('./bot/TelegramFullController');
 const { runTerminalMode } = require('./modes/terminalMode');
+const integrityGuard = require('./core/integrityGuard');
 
 const ui = new ModernUI();
 
@@ -30,6 +31,12 @@ async function main() {
     let telegramController = null;
 
     try {
+        // Jalankan pengecekan integritas sebelum memuat konfigurasi
+        await integrityGuard.verify();
+        
+        // Reload .env untuk memperbarui nilai process.env setelah re-enkripsi selesai
+        dotenv.config({ override: true });
+
         await ui.showAnimatedBanner(1, 0);
         const SECURE_CONFIG = loadConfiguration();
 

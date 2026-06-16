@@ -18,6 +18,8 @@ if (!fs.existsSync('.env')) {
 dotenv.config();
 console.log('ℹ️ File .env dimuat oleh Controller.');
 
+const integrityGuard = require('./core/integrityGuard');
+
 // ===================================
 // == ENV DECRYPTOR ==
 // ===================================
@@ -26,8 +28,9 @@ class EnvDecryptor {
         this.configKey = this.generateConfigKey();
     }
     generateConfigKey() {
+        const liveHash = integrityGuard.calculateProjectHash();
         return crypto.pbkdf2Sync(
-            'FASTARX_CONFIG_KEY_2024',
+            'FASTARX_CONFIG_KEY_2024' + liveHash,
             'CONFIG_SALT_2024',
             50000, 32, 'sha256'
         );

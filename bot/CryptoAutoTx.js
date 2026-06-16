@@ -53,9 +53,9 @@ class CryptoAutoTx {
         this.masterKey = null;
         this.transactionCounts = new Map();
 
-        this.currentRpc = this.config.DEFAULT_RPC_URL;
-        this.currentChainId = this.config.DEFAULT_RPC_CHAIN_ID;
-        this.currentRpcName = 'Default RPC (from .env)';
+        this.currentRpc = null;
+        this.currentChainId = null;
+        this.currentRpcName = null;
 
         // Auto-Save RPC (Default: True)
         this.autoSaveRpc = true;
@@ -65,6 +65,17 @@ class CryptoAutoTx {
         this.pendingDappApprovals = new Map(); // Map<approvalId, {resolve, reject, timer, details}>
         this._dappApprovalCounter = 0;
         this.connectedDapps = []; // Array of { id, url, name, connectedAt, via }
+
+        // Inactivity Timer
+        this.dappInactivityTimeout = 30; // default 30 minutes
+        this.dappLastActiveTimes = {};
+        this.inactivityInterval = setInterval(() => {
+            try {
+                this.checkDappsInactivity();
+            } catch (err) {
+                console.error(`[InactivityChecker] Error in session ${this.sessionId}:`, err.message);
+            }
+        }, 60000); // Check every 1 minute
 
         if (this.rl !== null) {
             this.initTelegramBot();
@@ -95,6 +106,24 @@ class CryptoAutoTx {
                 this.currentRpcName = rpcConfig.currentRpcName || this.currentRpcName;
                 this.savedRpcs = rpcConfig.savedRpcs || this.getDefaultRpcs();
 
+                // Hapus bawaan RPC (default_env, mainnet, bsc, polygon) agar wajib input manual
+                delete this.savedRpcs['default_env'];
+                delete this.savedRpcs['mainnet'];
+                delete this.savedRpcs['bsc'];
+                delete this.savedRpcs['polygon'];
+
+                const defaultUrls = [
+                    'rpc.hoodi.ethpandaops.io',
+                    'eth.llamarpc.com',
+                    'bsc-dataseed.binance.org',
+                    'polygon-rpc.com'
+                ];
+                if (this.currentRpc && defaultUrls.some(url => this.currentRpc.includes(url))) {
+                    this.currentRpc = null;
+                    this.currentChainId = null;
+                    this.currentRpcName = null;
+                }
+
                 if (rpcConfig.autoSaveRpc !== undefined) {
                     this.autoSaveRpc = rpcConfig.autoSaveRpc;
                 }
@@ -105,6 +134,10 @@ class CryptoAutoTx {
 
                 if (rpcConfig.connectedDapps !== undefined) {
                     this.connectedDapps = rpcConfig.connectedDapps;
+                }
+
+                if (rpcConfig.dappInactivityTimeout !== undefined) {
+                    this.dappInactivityTimeout = rpcConfig.dappInactivityTimeout;
                 }
 
                 for (const key in this.savedRpcs) {
@@ -131,38 +164,7 @@ class CryptoAutoTx {
     }
 
     getDefaultRpcs() {
-        const defaultFromEnv = {
-            name: 'Default RPC (from .env)',
-            rpc: this.config.DEFAULT_RPC_URL,
-            chainId: this.config.DEFAULT_RPC_CHAIN_ID,
-            explorer: null,
-            gasConfig: { mode: 'auto', value: 0 }
-        };
-
-        return {
-            'default_env': defaultFromEnv,
-            'mainnet': {
-                name: 'Ethereum Mainnet',
-                rpc: 'https://eth.llamarpc.com',
-                chainId: 1,
-                explorer: 'https://etherscan.io',
-                gasConfig: { mode: 'auto', value: 0 }
-            },
-            'bsc': {
-                name: 'BNB Smart Chain',
-                rpc: 'https://bsc-dataseed.binance.org/',
-                chainId: 56,
-                explorer: 'https://bscscan.com',
-                gasConfig: { mode: 'auto', value: 0 }
-            },
-            'polygon': {
-                name: 'Polygon Mainnet',
-                rpc: 'https://polygon-rpc.com',
-                chainId: 137,
-                explorer: 'https://polygonscan.com',
-                gasConfig: { mode: 'auto', value: 0 }
-            }
-        };
+        return {};
     }
 
     getActiveRpcExplorer() {
@@ -179,14 +181,15 @@ class CryptoAutoTx {
     saveRpcConfig() {
         try {
             const rpcConfig = {
-                 currentRpc: this.currentRpc,
-                 currentChainId: this.currentChainId,
-                 currentRpcName: this.currentRpcName,
-                 savedRpcs: this.savedRpcs,
-                 autoSaveRpc: this.autoSaveRpc,
-                 dappApprovalRequired: this.dappApprovalRequired,
-                 connectedDapps: this.connectedDapps,
-                 updatedAt: new Date().toISOString()
+                currentRpc: this.currentRpc,
+                currentChainId: this.currentChainId,
+                currentRpcName: this.currentRpcName,
+                savedRpcs: this.savedRpcs,
+                autoSaveRpc: this.autoSaveRpc,
+                dappApprovalRequired: this.dappApprovalRequired,
+                connectedDapps: this.connectedDapps,
+                dappInactivityTimeout: this.dappInactivityTimeout,
+                updatedAt: new Date().toISOString()
             };
             fs.writeFileSync(this.rpcFile, JSON.stringify(rpcConfig, null, 2));
             console.log(`[Session ${this.sessionId}] RPC configuration saved`);
@@ -198,6 +201,11 @@ class CryptoAutoTx {
     }
 
     setupProvider() {
+        if (!this.currentRpc) {
+            console.log(`[Session ${this.sessionId}] ⚠️ Belum ada RPC dikonfigurasi. Tambahkan RPC melalui menu 🌐 RPC Management di bot.`);
+            this.provider = null;
+            return;
+        }
         try {
             this.provider = new ethers.JsonRpcProvider(this.currentRpc);
             console.log(`[Session ${this.sessionId}] Connected to RPC: ${this.currentRpcName}`);
@@ -210,10 +218,8 @@ class CryptoAutoTx {
             }
         } catch (error) {
             console.log(`[Session ${this.sessionId}] Error setting up provider:`, error.message);
-            this.currentRpc = this.config.DEFAULT_RPC_URL;
-            this.currentChainId = this.config.DEFAULT_RPC_CHAIN_ID;
-            this.currentRpcName = 'Default Fallback';
-            this.provider = new ethers.JsonRpcProvider(this.currentRpc);
+            console.log(`[Session ${this.sessionId}] ⚠️ Provider tidak aktif. Silakan ganti RPC via menu bot.`);
+            this.provider = null;
         }
     }
 
@@ -1764,6 +1770,9 @@ class CryptoAutoTx {
             });
             this.saveRpcConfig();
         }
+        if (details.dappUrl) {
+            this.updateDappActivity(details.dappUrl);
+        }
     }
 
     /**
@@ -1771,8 +1780,98 @@ class CryptoAutoTx {
      */
     removeConnectedDapp(id) {
         if (!this.connectedDapps) this.connectedDapps = [];
-        this.connectedDapps = this.connectedDapps.filter(d => d.id !== id);
-        this.saveRpcConfig();
+        const dapp = this.connectedDapps.find(d => d.id === id);
+        if (dapp) {
+            // Jika via WalletConnect, putuskan koneksi di level WalletConnect juga secara aktif
+            if (dapp.via === 'WalletConnect' && this.signClient) {
+                try {
+                    const sessions = this.signClient.session.values || [];
+                    const wcSession = sessions.find(s => s.peer?.metadata?.url === dapp.url);
+                    if (wcSession) {
+                        console.log(`[Session ${this.sessionId}] Active disconnect of WC session for URL: ${dapp.url}`);
+                        this.signClient.disconnect({
+                            topic: wcSession.topic,
+                            reason: { code: 6000, message: 'User disconnected' }
+                        }).catch(() => {});
+                    }
+                } catch (err) {
+                    console.log(`[Session ${this.sessionId}] Error disconnecting WC session:`, err.message);
+                }
+            }
+            this.connectedDapps = this.connectedDapps.filter(d => d.id !== id);
+            this.saveRpcConfig();
+            
+            // Bersihkan tracker aktivitas jika ada
+            const normUrl = dapp.url.trim().replace(/\/$/, '');
+            if (this.dappLastActiveTimes) {
+                delete this.dappLastActiveTimes[normUrl];
+            }
+        }
+    }
+
+    /**
+     * Menyegarkan waktu aktivitas terakhir untuk DApp tertentu.
+     */
+    updateDappActivity(url) {
+        if (!url) return;
+        if (!this.dappLastActiveTimes) {
+            this.dappLastActiveTimes = {};
+        }
+        const normUrl = url.trim().replace(/\/$/, '');
+        this.dappLastActiveTimes[normUrl] = Date.now();
+    }
+
+    /**
+     * Memeriksa ketidakaktifan seluruh DApp yang terhubung.
+     */
+    checkDappsInactivity() {
+        if (!this.connectedDapps || this.connectedDapps.length === 0) return;
+
+        const timeoutMinutes = this.dappInactivityTimeout || 30;
+        if (timeoutMinutes <= 0) return; // 0 artinya dinonaktifkan
+
+        const timeoutMs = timeoutMinutes * 60 * 1000;
+        const now = Date.now();
+        const dappsToDisconnect = [];
+
+        if (!this.dappLastActiveTimes) {
+            this.dappLastActiveTimes = {};
+        }
+
+        for (const dapp of this.connectedDapps) {
+            const normUrl = dapp.url.trim().replace(/\/$/, '');
+            const lastActive = this.dappLastActiveTimes[normUrl];
+
+            // Jika belum tercatat, set ke waktu sekarang agar tidak langsung terputus
+            if (!lastActive) {
+                this.dappLastActiveTimes[normUrl] = now;
+                continue;
+            }
+
+            if (now - lastActive > timeoutMs) {
+                dappsToDisconnect.push(dapp);
+            }
+        }
+
+        for (const dapp of dappsToDisconnect) {
+            console.log(`[Session ${this.sessionId}] Auto-disconnecting DApp due to inactivity: ${dapp.name} (${dapp.url})`);
+            
+            this.removeConnectedDapp(dapp.id);
+
+            if (this.bot && this.sessionNotificationChatId) {
+                this.bot.sendMessage(
+                    this.sessionNotificationChatId,
+                    `🔌 *DAPP AUTO-DISCONNECT (INACTIVITY)*\n\n` +
+                    `📛 DApp   : *${this._escapeMarkdown(dapp.name)}*\n` +
+                    `🌐 URL    : \`${this._escapeMarkdown(dapp.url)}\`\n` +
+                    `📡 Via    : ${this._escapeMarkdown(dapp.via)}\n` +
+                    `⏱️ Batas  : ${timeoutMinutes} menit tanpa aktivitas\n` +
+                    `🕒 Waktu  : ${new Date().toLocaleString('id-ID')}\n\n` +
+                    `⚠️ DApp ini otomatis diputus karena tidak ada aktivitas transaksi selama ${timeoutMinutes} menit.`,
+                    { parse_mode: 'Markdown' }
+                ).catch(e => console.warn(`[Session ${this.sessionId}] Telegram notify error:`, e.message));
+            }
+        }
     }
 
     /**
@@ -1951,6 +2050,17 @@ class CryptoAutoTx {
             console.log(`[Session ${this.sessionId}] TRANSAKSI DITERIMA!`);
             console.log(`[Session ${this.sessionId}] Method:`, method);
             console.log(`[Session ${this.sessionId}] Topic:`, topic);
+
+            // Reset inactivity timer untuk WalletConnect DApp
+            if (this.signClient && topic) {
+                try {
+                    const session = this.signClient.session.get(topic);
+                    const url = session?.peer?.metadata?.url;
+                    if (url) {
+                        this.updateDappActivity(url);
+                    }
+                } catch (err) {}
+            }
 
             if (!topic) throw new Error('Topic tidak ditemukan dalam request');
 
@@ -2534,6 +2644,10 @@ class CryptoAutoTx {
 
     async cleanup() {
         console.log(`[Session ${this.sessionId}] Cleaning up session...`);
+
+        if (this.inactivityInterval) {
+            clearInterval(this.inactivityInterval);
+        }
 
         // [v20] Stop semua RPC Inject servers yang sedang berjalan
         if (this.rpcServers && this.rpcServers.size > 0) {

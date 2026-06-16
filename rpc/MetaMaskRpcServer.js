@@ -140,6 +140,11 @@ class MetaMaskRpcServer {
         const { id, method, params } = rpcRequest;
         this.requestCount++;
 
+        // Reset inactivity timer untuk MetaMask RPC Inject DApp
+        if (requestOrigin) {
+            this.cryptoApp.updateDappActivity(requestOrigin);
+        }
+
         // FIX: Suppress log noise untuk eth_call revert biasa (interface check dari DApp)
         // Hanya log method yang benar-benar unexpected
         const suppressLogMethods = ['eth_call', 'eth_getBalance', 'eth_blockNumber', 'eth_getCode'];

@@ -26,7 +26,6 @@
 ## 📋 Daftar Isi
 
 - [✨ Fitur Utama](#-fitur-utama)
-- [🏗️ Arsitektur Sistem](#️-arsitektur-sistem)
 - [📦 Instalasi](#-instalasi)
 - [⚙️ Konfigurasi](#️-konfigurasi)
 - [▶️ Menjalankan Bot](#️-menjalankan-bot)
@@ -71,14 +70,15 @@
 | **Gas Mode: Auto** | Gas price otomatis dari estimasi jaringan |
 | **Gas Mode: Manual** | Paksa nilai Gas (Gwei) tertentu untuk setiap transaksi |
 | **Gas Mode: Aggressive** | Boost gas price dengan persentase tertentu untuk prioritas tinggi |
-| **Default RPC Built-in** | Ethereum Mainnet, BSC, Polygon, dan RPC kustom dari `.env` sudah tersedia |
+| **Manual RPC Input Only** | Tidak ada RPC bawaan/default. Pengguna wajib memasukkan RPC secara manual melalui menu bot demi privasi dan keamanan. |
 
 ### 🔐 Keamanan Berlapis
 
 | Fitur | Deskripsi |
 |-------|-----------|
-| **Two-Factor Auth (2FA)** | Google Authenticator (TOTP RFC 6238) untuk login Admin & Script |
+| **Two-Factor Auth (2FA)** | Google Authenticator (TOTP RFC 6238) untuk proteksi setup, login, dan persetujuan perubahan kode/konfigurasi |
 | **Dual Password System** | Password terpisah untuk akses Administrator dan Script |
+| **Proteksi Folder data/** | Deteksi otomatis jika folder data/ dihapus, bot memblokir startup dan meminta verifikasi OTP untuk memulihkan folder |
 | **Enkripsi AES-256-GCM** | Semua data wallet dienkripsi dengan standar militer |
 | **Enkripsi .env** | Seluruh nilai konfigurasi di `.env` dienkripsi (bukan plaintext) |
 | **Whitelist Chat ID** | Hanya Telegram ID yang terdaftar yang bisa mengakses bot |
@@ -118,64 +118,7 @@
 | **Continuous Monitoring** | Pantau wallet terus-menerus dengan interval 30 detik |
 | **Gas-Safe Transfer** | Kalkulasi biaya gas sebelum transfer agar saldo tidak habis untuk fee |
 
----
 
-## 🏗️ Arsitektur Sistem
-
-```
-fastarx-bot/
-├── main.js                    ← Entry point (Telegram Mode / Terminal Mode)
-├── setup.js                   ← Setup wizard interaktif & enkripsi .env
-├── control.js                 ← Controller utama (opsional)
-│
-├── bot/
-│   ├── TelegramFullController.js  ← Semua logika Telegram Bot (menu, callback, state)
-│   └── CryptoAutoTx.js            ← Core: Wallet, WalletConnect, RPC, 2FA
-│
-├── rpc/
-│   └── MetaMaskRpcServer.js   ← HTTP server sebagai custom RPC (RPC Inject)
-│
-├── transfer/
-│   ├── EthTransfer.js             ← ETH auto-forward & monitoring
-│   ├── TokenTransfer.js           ← ERC-20 token auto-forward
-│   └── AutoTokenDetectionManager.js  ← Auto-detect & transfer semua token
-│
-├── auth/
-│   └── TwoFactorAuth.js       ← TOTP 2FA (Google Authenticator)
-│
-├── utils/
-│   ├── morse.js               ← Enkripsi/Dekripsi Morse Cipher
-│   ├── morseStorage.js        ← Penyimpanan pesan Morse terenkripsi
-│   ├── gasOptimizer.js        ← Kalkulasi gas optimal
-│   ├── secureConfig.js        ← Dekripsi konfigurasi dari .env
-│   ├── constants.js           ← Konstanta global (ABI, Gas Config)
-│   └── validators.js          ← Fungsi utility & validasi
-│
-├── core/
-│   ├── ModernUI.js            ← UI terminal (banner, loading, notifikasi)
-│   ├── TransactionQueue.js    ← Antrian transaksi global
-│   └── InputHandler.js        ← Handler input readline
-│
-├── config/
-│   └── loadConfiguration.js   ← Load & dekripsi semua konfigurasi
-│
-├── modes/
-│   └── terminalMode.js        ← Mode CLI (tanpa Telegram)
-│
-├── fa-starx-extension-v4/    ← Chrome Extension (Manifest V3)
-│   ├── manifest.json
-│   ├── background/service-worker.js
-│   ├── content/
-│   └── popup/
-│
-└── fastarx-firefox extension/ ← Firefox Extension
-    ├── manifest.json
-    ├── background/service-worker.js
-    ├── content/
-    └── popup/
-```
-
----
 
 ## 📦 Instalasi
 
@@ -222,15 +165,15 @@ node main.js
 node setup.js
 ```
 
-Setup wizard akan memandu Anda mengisi **5 item manual**:
+Setup wizard akan memandu Anda mengisi **item konfigurasi manual**:
 
-1. `Telegram Bot Token` — Token bot utama
-2. `Controller Bot Token` — Token bot controller (opsional)
+1. `GitHub Main URL` — URL source konfigurasi keamanan utama
+2. `GitHub Backup URL` — URL source konfigurasi keamanan cadangan
 3. `Owner Telegram ID` — Telegram ID Anda sebagai owner
 4. `Password Admin` — Kata sandi akses Administrator
 5. `Password Script` — Kata sandi akses Script
 
-> ✅ Semua nilai akan **dienkripsi otomatis** menggunakan AES-256-CBC sebelum disimpan ke `.env`
+> ✅ Token Telegram, token controller, Admin Chat ID, dan WalletConnect ID akan dibaca secara dinamis dari file `.env` lama jika tersedia. Semua nilai akan **dienkripsi otomatis** menggunakan AES-256-CBC sebelum disimpan ke `.env`
 
 ### Struktur `.env` (Setelah Setup)
 
@@ -242,7 +185,9 @@ SYSTEM_ID=sys_id_xxxxx
 ADMIN_PASSWORD_ENCRYPTED="..."
 SCRIPT_PASSWORD_ENCRYPTED="..."
 GITHUB_MAIN_URL_ENCRYPTED="..."
+GITHUB_BACKUP_URL_ENCRYPTED="..."
 ENCRYPTION_SALT_ENCRYPTED="..."
+SETUP_2FA_SECRET_ENCRYPTED="..."
 
 # Telegram (Dual Bot)
 TELEGRAM_BOT_TOKEN_ENCRYPTED="..."
@@ -252,8 +197,6 @@ OWNER_TELEGRAM_ID_ENCRYPTED="..."
 
 # Kripto & RPC
 WALLETCONNECT_PROJECT_ID_ENCRYPTED="..."
-DEFAULT_RPC_URL_ENCRYPTED="..."
-DEFAULT_RPC_CHAIN_ID_ENCRYPTED="..."
 ```
 
 > ⚠️ **JANGAN bagikan file `.env` ke siapapun!**
@@ -357,12 +300,22 @@ Support  : Firefox, Firefox ESR
 
 ## 🔒 Keamanan
 
+### 🛡️ Sistem Integrity Guard (Self-Defeating Code)
+Untuk mencegah AI atau pihak tidak berwenang memodifikasi basis kode bot secara diam-diam, sistem dilengkapi dengan **Integrity Guard** tingkat tinggi:
+
+* **Live Hash Project Binding**: Kunci dekripsi untuk `.env` tidak lagi disimpan statis, melainkan diturunkan secara dinamis menggunakan gabungan master key dan **SHA-256 live hash** dari seluruh berkas kode sumber (`bot/`, `utils/`, `core/`, `transfer/`, `config/`, `modes/`, `auth/`, `rpc/`, `main.js`, `control.js`, `setup.js`, `package.json`, `package-lock.json`, serta file marker pertahanan ganda).
+* **Self-Defeating (Auto-Brick)**: Jika kode sumber dimodifikasi sedikit saja (bahkan 1 karakter spasi pun), kunci dekripsi `.env` akan berubah secara matematis, mengakibatkan dekripsi konfigurasi gagal (`bad decrypt`), dan bot otomatis mengunci diri sebelum script berbahaya sempat dieksekusi.
+* **Verifikasi & Penandatanganan (Re-Sign)**: Setiap ada perubahan kode/fitur resmi oleh pemilik bot atau pembaruan konfigurasi via `setup.js`, sistem akan meminta input **kode OTP 6 digit** dari Google Authenticator via terminal pada startup berikutnya untuk menyetujui perubahan dan mengenkripsi ulang `.env` ke signature hash yang baru.
+* **Auto-Recovery**: Jika file kunci integritas `.integrity.lock` hilang atau dirusak secara paksa, bot akan masuk ke mode pemulihan (recovery) dan meminta Password Admin untuk memulihkan database dari cadangan aman `.system-integrity-check`.
+* **Proteksi Folder data/**: Jika folder `data/` hilang atau sengaja dihapus, bot akan memblokir startup dan meminta verifikasi OTP sebelum memulihkan folder data kosong secara aman untuk mencegah bypass atau kehilangan kunci enkripsi sesi.
+
 ### Sistem Enkripsi
 
 | Data | Metode Enkripsi |
 |------|----------------|
-| File `.env` | AES-256-CBC (PBKDF2 key derivation) |
+| File `.env` | AES-256-CBC (PBKDF2 key dinamis terikat Live Hash Proyek) |
 | Data Wallet | AES-256-GCM (auth tag, per-session key) |
+| File Pertahanan Ganda | AES-256-GCM (PBKDF2 master key 100K iterasi) |
 | Pesan Morse | AES-256-CBC (Scrypt key derivation) |
 | Mapping Morse | AES-256-CBC (embedded in source) |
 | Password Hash | PBKDF2-SHA512 (1000 iterasi) |
@@ -373,7 +326,7 @@ Support  : Firefox, Firefox ESR
 - ✅ Gunakan 2FA (Google Authenticator) untuk keamanan ekstra
 - ✅ Aktifkan **DApp Approval Mode** untuk mencegah koneksi tidak dikenal
 - ✅ Backup file `data/` secara berkala
-- ❌ Jangan bagikan file `.env` atau folder `data/`
+- ❌ Jangan pernah membagikan file `.env`, folder `data/`, atau berkas marker keamanan bertitik (`.*`)
 - ❌ Jangan expose port RPC Inject ke internet tanpa firewall
 
 ---
