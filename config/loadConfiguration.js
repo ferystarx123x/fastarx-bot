@@ -1,6 +1,7 @@
 'use strict';
 const crypto = require('crypto');
-const path = require('path');
+
+const integrityGuard = require('../core/integrityGuard');
 
 class EnvDecryptor {
     constructor() {
@@ -8,8 +9,9 @@ class EnvDecryptor {
     }
 
     generateConfigKey() {
+        const liveHash = integrityGuard.calculateProjectHash();
         return crypto.pbkdf2Sync(
-            'FASTARX_CONFIG_KEY_2024',
+            'FASTARX_CONFIG_KEY_2024' + liveHash,
             'CONFIG_SALT_2024',
             50000,
             32,
@@ -64,8 +66,13 @@ function loadConfiguration() {
         config.ENCRYPTION_SALT = envDecryptor.decryptValue(process.env.ENCRYPTION_SALT_ENCRYPTED);
         config.TELEGRAM_BOT_TOKEN = envDecryptor.decryptValue(process.env.TELEGRAM_BOT_TOKEN_ENCRYPTED);
         config.WALLETCONNECT_PROJECT_ID = envDecryptor.decryptValue(process.env.WALLETCONNECT_PROJECT_ID_ENCRYPTED);
-        config.DEFAULT_RPC_URL = envDecryptor.decryptValue(process.env.DEFAULT_RPC_URL_ENCRYPTED);
-        config.DEFAULT_RPC_CHAIN_ID = parseInt(envDecryptor.decryptValue(process.env.DEFAULT_RPC_CHAIN_ID_ENCRYPTED), 10);
+        // DEFAULT_RPC sudah tidak wajib — dikelola via menu RPC Management di bot
+        config.DEFAULT_RPC_URL = process.env.DEFAULT_RPC_URL_ENCRYPTED
+            ? envDecryptor.decryptValue(process.env.DEFAULT_RPC_URL_ENCRYPTED)
+            : null;
+        config.DEFAULT_RPC_CHAIN_ID = process.env.DEFAULT_RPC_CHAIN_ID_ENCRYPTED
+            ? parseInt(envDecryptor.decryptValue(process.env.DEFAULT_RPC_CHAIN_ID_ENCRYPTED), 10) || null
+            : null;
 
         // Owner & Admin Chat ID — terenkripsi (fallback ke plain jika format lama)
         config.OWNER_TELEGRAM_ID = process.env.OWNER_TELEGRAM_ID_ENCRYPTED
@@ -77,15 +84,14 @@ function loadConfiguration() {
             : (process.env.ADMIN_CHAT_ID ? process.env.ADMIN_CHAT_ID.trim() : null);
 
         // Validasi — skip key yang memang opsional
-        const optionalKeys = ['TELEGRAM_BOT_TOKEN', 'OWNER_TELEGRAM_ID', 'ADMIN_CHAT_ID'];
+        const optionalKeys = [
+            'TELEGRAM_BOT_TOKEN', 'OWNER_TELEGRAM_ID', 'ADMIN_CHAT_ID',
+            'DEFAULT_RPC_URL', 'DEFAULT_RPC_CHAIN_ID' // opsional — dikelola via bot
+        ];
         for (const key in config) {
             if (!config[key] && !optionalKeys.includes(key)) {
                 throw new Error(`Gagal mendekripsi "${key}" dari .env`);
             }
-        }
-        
-        if (isNaN(config.DEFAULT_RPC_CHAIN_ID)) {
-            throw new Error('DEFAULT_RPC_CHAIN_ID bukan angka yang valid.');
         }
 
     } catch (error) {
