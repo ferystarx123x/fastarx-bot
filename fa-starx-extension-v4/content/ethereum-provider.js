@@ -1,30 +1,25 @@
 /**
- * 0xfastarx - Ethereum Provider
+ * MetaMask - Ethereum Provider Spoofing
  * Diinject ke page context DApp — override window.ethereum
  * Berjalan di MAIN world secara sinkron saat document_start.
- * 
- * FIX: Menggunakan sessionStorage cache untuk memulihkan koneksi secara 
- * sinkron instan saat reload (mencegah race condition dengan Wagmi/React).
  */
 (function () {
-  if (window.__FASTARX_V4_INJECTED__) return;
-  window.__FASTARX_V4_INJECTED__ = true;
+  if (window.__METAMASK_INJECTED_PROV__) return;
+  window.__METAMASK_INJECTED_PROV__ = true;
 
-  const FASTARX_CHANNEL = 'fastarx_rpc_v4';
+  const FASTARX_CHANNEL = 'ethereum_provider_rpc_v4';
 
   const pendingRequests = new Map();
   let requestId = 1;
 
   // ─── SYNCHRONOUS CACHE (sessionStorage) ───────────────────────────────────
   // Menyimpan address & chainId aktif agar langsung siap secara sinkron saat reload
-  const cachedAccount = sessionStorage.getItem('__0xfastarx_active_account__');
-  const cachedChain = sessionStorage.getItem('__0xfastarx_active_chain__');
+  const cachedAccount = sessionStorage.getItem('__eth_cache_addr__');
+  const cachedChain = sessionStorage.getItem('__eth_cache_chain__');
 
   let _chainId = cachedChain || null;
   let _accounts = cachedAccount ? [cachedAccount] : [];
   let _connected = !!cachedAccount;
-
-  console.log('[0xfastarx] 📥 Cache loaded:', { cachedAccount, cachedChain });
 
   // ─── Listen responses dari injector.js (bridge) ───────────────────────────
   window.addEventListener('message', (event) => {
@@ -63,7 +58,7 @@
       const timer = setTimeout(() => {
         if (pendingRequests.has(id)) {
           pendingRequests.delete(id);
-          reject(new Error('0xfastarx: Request timeout — pastikan bot sudah running'));
+          reject(new Error('MetaMask: Request timeout'));
         }
       }, timeoutMs);
       pendingRequests.set(id, { resolve, reject, timer });
@@ -81,8 +76,8 @@
     fastarxProvider.chainId = null;
     fastarxProvider.networkVersion = null;
 
-    sessionStorage.removeItem('__0xfastarx_active_account__');
-    sessionStorage.removeItem('__0xfastarx_active_chain__');
+    sessionStorage.removeItem('__eth_cache_addr__');
+    sessionStorage.removeItem('__eth_cache_chain__');
   }
 
   // ─── Update cache state ──────────────────────────────────────────────────
@@ -92,19 +87,18 @@
       fastarxProvider.selectedAddress = accounts[0];
       _connected = true;
       fastarxProvider._isConnected = true;
-      sessionStorage.setItem('__0xfastarx_active_account__', accounts[0]);
+      sessionStorage.setItem('__eth_cache_addr__', accounts[0]);
     }
     if (chainId) {
       _chainId = chainId;
       fastarxProvider.chainId = chainId;
       fastarxProvider.networkVersion = parseInt(chainId, 16).toString();
-      sessionStorage.setItem('__0xfastarx_active_chain__', chainId);
+      sessionStorage.setItem('__eth_cache_chain__', chainId);
     }
   }
 
   // ─── Notify injector/background tentang disconnect ────────────────────────
   function _notifyDisconnect(reason) {
-    console.log('[0xfastarx] 🔌 Disconnect event:', reason || 'DApp initiated disconnect');
     window.postMessage({
       channel: FASTARX_CHANNEL + '_dapp_disconnect',
       origin: window.location.origin,
@@ -115,15 +109,12 @@
   // ─── EIP-1193 Provider ────────────────────────────────────────────────────
   const fastarxProvider = {
     isMetaMask: true,
-    isFaStarX: true,
     selectedAddress: cachedAccount || null,
     chainId: cachedChain || null,
     networkVersion: cachedChain ? parseInt(cachedChain, 16).toString() : null,
     _isConnected: !!cachedAccount,
 
     async request({ method, params = [] }) {
-      console.log('[0xfastarx] →', method);
-
       switch (method) {
         case 'eth_requestAccounts':
         case 'eth_accounts': {
@@ -163,7 +154,6 @@
         case 'wallet_revokePermissions':
         case 'wallet_disconnect':
         case 'wallet_revokeAllPermissions': {
-          console.log('[0xfastarx] 🔌 DApp melakukan disconnect via:', method);
           _resetState();
           _notifyDisconnect(method);
 
@@ -205,7 +195,6 @@
       if (event === 'accountsChanged') {
         const wrappedCallback = (accounts) => {
           if (accounts.length === 0 && _connected) {
-            console.log('[0xfastarx] 🔌 Deteksi disconnect via accountsChanged([])');
             _resetState();
             _notifyDisconnect('accountsChanged_empty');
           } else if (accounts.length > 0) {
@@ -213,7 +202,7 @@
           }
           callback(accounts);
         };
-        callback.__fastarx_wrapped__ = wrappedCallback;
+        callback.__metamask_wrapped__ = wrappedCallback;
         listeners[event][listeners[event].length - 1] = wrappedCallback;
       }
 
@@ -222,7 +211,7 @@
 
     removeListener(event, callback) {
       if (listeners[event]) {
-        const target = callback.__fastarx_wrapped__ || callback;
+        const target = callback.__metamask_wrapped__ || callback;
         listeners[event] = listeners[event].filter(x => x !== target);
       }
       return this;
@@ -239,16 +228,12 @@
       writable: false,
       configurable: true
     });
-    console.log('[0xfastarx] ✅ window.ethereum injected synchronously in MAIN world');
   } catch (e) {
-    try { window.ethereum = fastarxProvider; } catch (e2) {
-      console.error('[0xfastarx] Inject failed:', e2.message);
-    }
+    try { window.ethereum = fastarxProvider; } catch (e2) {}
   }
 
   // ─── AUTO-RESTORE SESSION saat page reload (Double Check dengan Bot) ─────
   async function autoRestoreSession() {
-    console.log('[0xfastarx] 🔄 Memverifikasi session dengan bot...');
     try {
       const accounts = await sendRequest('eth_accounts', [], 5000);
 
@@ -267,10 +252,7 @@
         if (oldChain !== chainId) {
           emit('chainChanged', chainId);
         }
-
-        console.log('[0xfastarx] ✅ Session terverifikasi dengan bot:', accounts[0]);
       } else {
-        console.log('[0xfastarx] ℹ️ Bot mengembalikan empty session. Reset state.');
         if (_connected) {
           _resetState();
           emit('accountsChanged', []);
@@ -278,7 +260,6 @@
         }
       }
     } catch (e) {
-      console.log('[0xfastarx] ⚠️ Verifikasi session gagal (bot offline?):', e.message);
       // Jika bot offline, kita tetap pertahankan cache sementara agar UI tidak rusak
     }
   }
@@ -297,10 +278,10 @@
   function announceProvider() {
     const detail = Object.freeze({
       info: Object.freeze({
-        uuid: 'fa-starx-bot-v4',
-        name: '0xfastarx',
-        icon: 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHZpZXdCb3g9IjAgMCAzMiAzMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHJ4PSI4IiBmaWxsPSIjMDAwIi8+PHRleHQgeD0iNiIgeT0iMjMiIGZvbnQtc2l6ZT0iMjAiPvCfmoA8L3RleHQ+PC9zdmc+',
-        rdns: 'io.0xfastarx'
+        uuid: crypto.randomUUID ? crypto.randomUUID() : 'ec519c72-911e-450e-ac63-47209774618e',
+        name: 'MetaMask',
+        icon: 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+PHBhdGggZmlsbD0iI2UyNzYxYiIgZD0iTTE2IDRsLTkgOGg2bDMtNiAzIDZoNnoiLz48cGF0aCBmaWxsPSIjZTQ3NjFiIiBkPSJNMTYgMjhsLTgtOGgxNnoiLz48cGF0aCBmaWxsPSIjZDdjMWIxIiBkPSJNNyAxMmw5IDggOS04LTItNEg5eiIvPjxjaXJjbGUgY3g9IjExIiBjeT0iMTUiIHI9IjIiIGZpbGw9IiMwMDAiLz48Y2lyY2xlIGN4PSIyMSIgY3k9IjE1IiByPSIyIiBmaWxsPSIjMDAwIi8+PC9zdmc+',
+        rdns: 'io.metamask'
       }),
       provider: fastarxProvider
     });

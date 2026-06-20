@@ -1,10 +1,10 @@
 /**
- * 0xfastarx - Content Script (injector.js)
+ * MetaMask - Content Script (injector.js)
  * Berjalan di ISOLATED world.
  * Bertindak sebagai bridge/jembatan komunikasi antara page context (MAIN world) dan background service worker.
  */
 
-const FASTARX_CHANNEL = 'fastarx_rpc_v4';
+const FASTARX_CHANNEL = 'ethereum_provider_rpc_v4';
 
 // ─── 1. Bridge: Page (MAIN world) → Background (RPC requests) ───────────────
 window.addEventListener('message', async (event) => {
@@ -28,7 +28,7 @@ window.addEventListener('message', async (event) => {
         window.postMessage({
           channel: FASTARX_CHANNEL + '_response',
           id,
-          error: { code: -32603, message: '0xfastarx: No response from background' }
+          error: { code: -32603, message: 'MetaMask: No response' }
         }, '*');
         return;
       }
@@ -53,7 +53,7 @@ window.addEventListener('message', async (event) => {
   // ── DApp Disconnect Event ─────────────────────────────────────────────────
   if (event.data.channel === FASTARX_CHANNEL + '_dapp_disconnect') {
     const { origin, reason } = event.data;
-    console.log('[0xfastarx] 📤 Forwarding disconnect ke background:', origin, reason);
+    console.log('[MetaMask] 📤 Forwarding disconnect:', origin, reason);
 
     try {
       await chrome.runtime.sendMessage({
@@ -62,7 +62,7 @@ window.addEventListener('message', async (event) => {
         reason: reason || 'unknown'
       });
     } catch (err) {
-      console.warn('[0xfastarx] Gagal kirim disconnect ke background:', err.message);
+      console.warn('[MetaMask] Disconnect relay failed:', err.message);
     }
     return;
   }
@@ -82,5 +82,3 @@ chrome.runtime.onMessage.addListener((message) => {
 // ─── 3. Kirim notif ke background: ada tab baru yang load ───────────────────
 chrome.runtime.sendMessage({ action: 'tabReady', origin: window.location.origin })
   .catch(() => {});
-
-console.log('[0xfastarx] Bridge content script (ISOLATED) ready:', window.location.origin);

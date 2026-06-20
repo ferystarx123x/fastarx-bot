@@ -190,7 +190,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               const data = await res.json();
               const accounts = data.result || [];
               if (accounts.length > 0) return { result: accounts };
-              return { result: [storedStatus.address] };
+              
+              // Jika bot online tapi mengembalikan empty array, artinya DApp tidak terhubung di sisi bot.
+              // Hapus status koneksi dari extension storage agar tersinkronisasi.
+              console.log(`[0xfastarx] Bot returned empty accounts for ${origin}. Disconnecting in extension.`);
+              await disconnectOrigin(origin);
+              return { result: [] };
             } catch (e) {
               console.log('[0xfastarx] Bot offline sementara, return cached address');
               return { result: [storedStatus.address] };
@@ -210,6 +215,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             storedStatus.address = result[0];
             storedStatus.lastCheck = new Date().toISOString();
             await storageSet(KEY_BOT_STATUS, storedStatus);
+          } else if ((msg.method === 'eth_requestAccounts' || msg.method === 'eth_accounts')
+              && (!result || result.length === 0)) {
+            // Jika bot online tapi mengembalikan empty array, pastikan di extension juga disconnect!
+            await disconnectOrigin(origin);
           }
 
           return { result };
