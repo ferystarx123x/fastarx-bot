@@ -1880,7 +1880,11 @@ class CryptoAutoTx {
     isDappConnected(url) {
         if (!url || url === 'Unknown Origin') return false;
         if (!this.connectedDapps) this.connectedDapps = [];
-        return this.connectedDapps.some(d => d.url === url);
+        const normUrl = url.trim().replace(/\/$/, '').toLowerCase();
+        return this.connectedDapps.some(d => {
+            const dNorm = d.url.trim().replace(/\/$/, '').toLowerCase();
+            return dNorm === normUrl || dNorm.includes(normUrl) || normUrl.includes(dNorm);
+        });
     }
 
     /**

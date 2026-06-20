@@ -181,9 +181,20 @@ class MetaMaskRpcServer {
                 return { jsonrpc: '2.0', id, result: [] };
             }
 
+            const dappOrigin = requestOrigin || 'Unknown Origin';
+            const isConnected = this.cryptoApp.isDappConnected(dappOrigin);
+
+            // Jika eth_accounts, kembalikan address hanya jika DApp sudah terkoneksi
+            if (method === 'eth_accounts') {
+                if (!isConnected) {
+                    return { jsonrpc: '2.0', id, result: [] };
+                }
+                console.log(`[RPC Inject] 👛 ${method} → ${address}`);
+                return { jsonrpc: '2.0', id, result: [address.toLowerCase()] };
+            }
+
             // [v19.2] DApp Connection Approval — hanya untuk eth_requestAccounts (first connect)
             if (method === 'eth_requestAccounts') {
-                const dappOrigin = requestOrigin || 'Unknown Origin';
                 const dappDetails = {
                     dappName: this._extractDappName(dappOrigin),
                     dappUrl: dappOrigin,
@@ -191,8 +202,6 @@ class MetaMaskRpcServer {
                     walletAddress: address,
                     via: `RPC Inject (Port ${this.port})`
                 };
-
-                const isConnected = this.cryptoApp.isDappConnected(dappOrigin);
 
                 if (this.cryptoApp.dappApprovalRequired && !isConnected) {
                     console.log(`[RPC Inject] 🔐 DApp Approval ON — menunggu persetujuan user untuk: ${dappOrigin}`);
