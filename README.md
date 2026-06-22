@@ -30,6 +30,7 @@
 - [⚙️ Konfigurasi](#️-konfigurasi)
 - [▶️ Menjalankan Bot](#️-menjalankan-bot)
 - [📱 Panduan Penggunaan Telegram](#-panduan-penggunaan-telegram)
+- [🎛️ Bot Saklar (Controller)](#️-bot-saklar-controller)
 - [🦊 Browser Extension](#-browser-extension)
 - [🔒 Keamanan](#-keamanan)
 - [📁 Struktur Direktori](#-struktur-direktori)
@@ -85,6 +86,8 @@
 | **Sesi Terpisah** | Setiap pengguna mendapat session terenkripsi yang terisolasi |
 | **OTP Login** | Opsi masuk via kode 6-digit Google Authenticator tanpa mengetik password |
 | **Grace Period 2FA** | Periode tenggang 7 hari jika password diubah setelah 2FA dipasang |
+| **OTP Startup via Telegram** | Saat ada perubahan file/konfigurasi, OTP diminta langsung via Bot Saklar di Telegram (bukan di terminal) |
+| **Pesan Kontekstual** | Notifikasi Telegram membedakan antara perubahan konfigurasi (.env) dan modifikasi file kode program |
 
 ### 🌐 DApp Connection Approval
 
@@ -263,6 +266,65 @@ Bot akan otomatis mendeteksi mode:
 
 ---
 
+## 🎛️ Bot Saklar (Controller)
+
+Bot Saklar (`control.js`) adalah bot Telegram terpisah yang berfungsi sebagai **remote control** untuk mengelola Bot Utama dari jarak jauh.
+
+### Cara Menjalankan
+
+```bash
+node control.js
+```
+
+### Fitur Bot Saklar
+
+| Fitur | Deskripsi |
+|-------|-----------|
+| **Start / Stop Bot** | Nyalakan dan matikan Bot Utama & Bot Auto langsung dari Telegram |
+| **Cek Status** | Pantau status aktif/nonaktif semua bot dan resource VPS secara real-time |
+| **Kelola User** | Tambah, blokir, set masa aktif, dan hapus user Bot Utama |
+| **⚙️ Pengaturan .env** | Edit semua variabel konfigurasi `.env` langsung dari Telegram tanpa perlu SSH |
+| **Reset 2FA** | Generate secret Google Authenticator baru dan tampilkan QR Code via Telegram |
+| **OTP Gateway** | Menerima dan memverifikasi kode OTP dari Admin saat Bot Utama membutuhkan persetujuan startup |
+
+### Menu Pengaturan .env
+
+Melalui menu **⚙️ Pengaturan .env**, Anda dapat mengubah:
+
+```
+🌐 GitHub Main URL        →  URL source konfigurasi utama (disensor, hanya nama file)
+🌐 GitHub Backup URL      →  URL source konfigurasi cadangan (disensor)
+👤 Owner Telegram ID      →  Telegram ID pemilik bot
+🆔 Admin Chat ID          →  Chat ID admin Bot Saklar
+🤖 Token Bot Utama        →  Token Telegram Bot Utama
+🔌 Token Controller       →  Token Telegram Bot Saklar
+🔑 Password Admin         →  Password akses Administrator
+🔑 Password Script        →  Password akses Script
+🔄 Reset 2FA              →  Buat ulang secret Google Authenticator
+```
+
+> 🔒 Semua nilai baru langsung dienkripsi dengan AES-256-CBC sebelum disimpan ke `.env`.
+
+### Alur Verifikasi OTP Startup
+
+Ketika Bot Utama dijalankan setelah ada perubahan file/konfigurasi:
+
+```
+1. Bot Utama (main.js) mendeteksi perubahan
+2. Mengirim request ke Bot Saklar (port 3099)
+3. Bot Saklar mengirim notifikasi ke Telegram Admin:
+   - ⚙️ Pesan khusus jika perubahan KONFIGURASI (.env)
+   - 🚨 Pesan peringatan jika perubahan FILE KODE PROGRAM
+4. Admin memasukkan 6-digit OTP via chat Telegram
+5. Bot Saklar memverifikasi OTP dan membalas ke Bot Utama
+6. Bot Utama disetujui → startup dilanjutkan ✅
+   (Jika OTP salah/timeout → Bot Utama berhenti otomatis)
+```
+
+> 💡 Jika Bot Saklar sedang offline, Bot Utama otomatis fallback ke input OTP via terminal.
+
+---
+
 ## 🦊 Browser Extension
 
 Bot ini dilengkapi **dua versi browser extension** untuk kemudahan integrasi dengan DApp:
@@ -305,7 +367,8 @@ Untuk mencegah AI atau pihak tidak berwenang memodifikasi basis kode bot secara 
 
 * **Live Hash Project Binding**: Kunci dekripsi untuk `.env` tidak lagi disimpan statis, melainkan diturunkan secara dinamis menggunakan gabungan master key dan **SHA-256 live hash** dari seluruh berkas kode sumber (`bot/`, `utils/`, `core/`, `transfer/`, `config/`, `modes/`, `auth/`, `rpc/`, `main.js`, `control.js`, `setup.js`, `package.json`, `package-lock.json`, serta file marker pertahanan ganda).
 * **Self-Defeating (Auto-Brick)**: Jika kode sumber dimodifikasi sedikit saja (bahkan 1 karakter spasi pun), kunci dekripsi `.env` akan berubah secara matematis, mengakibatkan dekripsi konfigurasi gagal (`bad decrypt`), dan bot otomatis mengunci diri sebelum script berbahaya sempat dieksekusi.
-* **Verifikasi & Penandatanganan (Re-Sign)**: Setiap ada perubahan kode/fitur resmi oleh pemilik bot atau pembaruan konfigurasi via `setup.js`, sistem akan meminta input **kode OTP 6 digit** dari Google Authenticator via terminal pada startup berikutnya untuk menyetujui perubahan dan mengenkripsi ulang `.env` ke signature hash yang baru.
+* **Verifikasi OTP via Telegram**: Setiap ada perubahan kode/konfigurasi, Bot Utama menghubungi **Bot Saklar** secara lokal (HTTP port 3099). Bot Saklar mengirim notifikasi ke Telegram Admin dengan pesan yang **berbeda dan kontekstual** — pesan berbeda untuk perubahan konfigurasi `.env` vs modifikasi file kode program. Admin cukup memasukkan OTP 6 digit di Telegram, tanpa perlu akses terminal/SSH.
+* **Fallback CLI**: Jika Bot Saklar tidak aktif saat startup, sistem otomatis fallback ke input OTP/password via terminal.
 * **Auto-Recovery**: Jika file kunci integritas `.integrity.lock` hilang atau dirusak secara paksa, bot akan masuk ke mode pemulihan (recovery) dan meminta Password Admin untuk memulihkan database dari cadangan aman `.system-integrity-check`.
 * **Proteksi Folder data/**: Jika folder `data/` hilang atau sengaja dihapus, bot akan memblokir startup dan meminta verifikasi OTP sebelum memulihkan folder data kosong secara aman untuk mencegah bypass atau kehilangan kunci enkripsi sesi.
 
