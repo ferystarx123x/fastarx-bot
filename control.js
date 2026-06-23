@@ -573,6 +573,31 @@ const ENV_FIELDS_MAP = {
     'SCRIPT_PASSWORD_ENCRYPTED': 'Password Script'
 };
 
+let restartTimer = null;
+
+function scheduleAutoRestart(chatId) {
+    if (restartTimer) {
+        clearTimeout(restartTimer);
+    }
+    
+    bot.sendMessage(chatId, '🔄 *Notifikasi:* Perubahan konfigurasi terdeteksi. Bot Saklar akan otomatis restart dalam *60 detik* untuk menerapkan konfigurasi baru.', { parse_mode: 'Markdown' }).catch(() => {});
+    
+    restartTimer = setTimeout(() => {
+        bot.sendMessage(chatId, '🔄 *Restarting...* Memulai ulang Bot Saklar sekarang.', { parse_mode: 'Markdown' })
+            .catch(() => {})
+            .finally(() => {
+                console.log('🔄 Melakukan restart otomatis...');
+                const spawn = require('child_process').spawn;
+                const child = spawn(process.argv[0], process.argv.slice(1), {
+                    detached: true,
+                    stdio: 'inherit'
+                });
+                child.unref();
+                process.exit(0);
+            });
+    }, 60000);
+}
+
 function sendEnvMenu(chatId) {
     const text = `⚙️ *PENGATURAN .env*
     
@@ -663,6 +688,7 @@ function handleEnvEditInput(chatId, field, value) {
             note = '\n\n*⚠️ Catatan:* Perubahan Token Controller atau Admin Chat ID akan aktif setelah Controller Bot di-restart.';
         }
         bot.sendMessage(chatId, `✅ *${fieldName}* berhasil diperbarui di file .env!${note}`, { parse_mode: 'Markdown' }).catch(() => {});
+        scheduleAutoRestart(chatId);
     } else {
         bot.sendMessage(chatId, '❌ Gagal mengupdate file .env.').catch(() => {});
     }
@@ -711,6 +737,7 @@ function handle2faSetupConfirm(chatId, secret, otpCode) {
     const ok = updateEnvField('SETUP_2FA_SECRET_ENCRYPTED', encryptedSecret);
     if (ok) {
         bot.sendMessage(chatId, '✅ *Setup 2FA* berhasil diperbarui dan aktif!').catch(() => {});
+        scheduleAutoRestart(chatId);
     } else {
         bot.sendMessage(chatId, '❌ Gagal menyimpan 2FA Secret baru ke file .env.').catch(() => {});
     }
