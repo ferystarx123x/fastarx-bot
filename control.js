@@ -599,9 +599,33 @@ function scheduleAutoRestart(chatId) {
 
                 const spawnAndExit = () => {
                     const spawn = require('child_process').spawn;
+                    const cleanEnv = { ...process.env };
+                    
+                    // Hapus semua key dari process.env yang ada di file .env 
+                    // agar dotenv pada proses baru membaca ulang nilai terbaru dari file disk.
+                    try {
+                        const envPath = path.join(__dirname, '.env');
+                        if (fs.existsSync(envPath)) {
+                            const envContent = fs.readFileSync(envPath, 'utf8');
+                            const lines = envContent.split(/\r?\n/);
+                            for (const line of lines) {
+                                const trimmed = line.trim();
+                                if (trimmed && !trimmed.startsWith('#') && trimmed.includes('=')) {
+                                    const key = trimmed.split('=')[0].trim();
+                                    if (key) {
+                                        delete cleanEnv[key];
+                                    }
+                                }
+                            }
+                        }
+                    } catch (err) {
+                        console.error('⚠️ Gagal membersihkan environment variables:', err.message);
+                    }
+
                     const child = spawn(process.argv[0], process.argv.slice(1), {
                         detached: true,
-                        stdio: 'inherit'
+                        stdio: 'inherit',
+                        env: cleanEnv
                     });
                     child.unref();
                     process.exit(0);
