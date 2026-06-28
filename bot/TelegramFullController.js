@@ -5428,13 +5428,21 @@ class TelegramFullController {
                 }
                 this.showTrackerListWallets(chatId);
             }
-            else if (data.startsWith('tracker_history_')) {
-                const page = parseInt(data.replace('tracker_history_', '')) || 1;
-                this.showTrackerHistory(chatId, page);
+            else if (data === 'tracker_history_select') {
+                this.showTrackerHistorySelect(chatId);
+            }
+            else if (data.startsWith('tracker_history_view_')) {
+                const parts = data.replace('tracker_history_view_', '').split('_');
+                const walletIdx = parseInt(parts[0]);
+                const page = parseInt(parts[1]) || 1;
+                this.showTrackerHistory(chatId, walletIdx, page);
             }
             else if (data.startsWith('tracker_hist_detail_')) {
-                const idx = parseInt(data.replace('tracker_hist_detail_', ''));
-                this.showTrackerHistoryDetail(chatId, idx);
+                const parts = data.replace('tracker_hist_detail_', '').split('_');
+                const walletIdx = parseInt(parts[0]);
+                const idx = parseInt(parts[1]);
+                const page = parseInt(parts[2]) || 1;
+                this.showTrackerHistoryDetail(chatId, walletIdx, idx, page);
             }
             else if (data === 'morse_menu') {
                 this.showMorseMenu(chatId);
@@ -6603,7 +6611,7 @@ class TelegramFullController {
                 { text: '📋 Daftar Pantauan', callback_data: 'tracker_list_wallets' }
             ],
             [
-                { text: '📜 History Tracking', callback_data: 'tracker_history_1' },
+                { text: '📜 History Tracking', callback_data: 'tracker_history_select' },
                 { text: state.active ? '🔴 Hentikan Tracker' : '🟢 Aktifkan Tracker', callback_data: 'tracker_toggle' }
             ],
             [
@@ -6645,56 +6653,120 @@ class TelegramFullController {
         this.bot.sendMessage(chatId, txt, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
     }
 
-    async showTrackerHistory(chatId, page = 1) {
+    showTrackerHistorySelect(chatId) {
+        const wallets = this.getTrackedWallets(chatId);
+
+        if (wallets.length === 0) {
+            const keyboard = [
+                [{ text: '➕ Tambah Wallet', callback_data: 'tracker_add_wallet' }],
+                [{ text: '🔙 Kembali', callback_data: 'tracker_menu' }]
+            ];
+            this.bot.sendMessage(chatId,
+                `📜 *RIWAYAT TRACKING*\n\nBelum ada wallet yang dipantau. Silakan tambah wallet terlebih dahulu.`,
+                { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } }
+            );
+            return;
+        }
+
+        // Hitung jumlah transaksi per wallet
         const history = this.getTrackerHistory(chatId);
+        const keyboard = wallets.map((w, idx) => {
+            const truncated = `${w.address.slice(0, 6)}...${w.address.slice(-4)}`;
+            const txCount = history.filter(h => h.walletAddress && h.walletAddress.toLowerCase() === w.address.toLowerCase()).length;
+            return [{
+                text: `💼 ${w.name} (${truncated}) — ${txCount} tx`,
+                callback_data: `tracker_history_view_${idx}_1`
+            }];
+        });
+
+        keyboard.push([{ text: '🔙 Kembali', callback_data: 'tracker_menu' }]);
+
+        this.bot.sendMessage(chatId,
+            `📜 *RIWAYAT TRACKING*\n\nSilakan pilih wallet untuk melihat riwayat transaksi:`,
+            { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } }
+        );
+    }
+
+    async showTrackerHistory(chatId, walletIdx, page = 1) {
+        const wallets = this.getTrackedWallets(chatId);
+        const wallet = wallets[walletIdx];
+
+        if (!wallet) {
+            this.bot.sendMessage(chatId, `❌ Wallet tidak ditemukan.`);
+            this.showTrackerHistorySelect(chatId);
+            return;
+        }
+
+        const allHistory = this.getTrackerHistory(chatId);
+        const filtered = allHistory.filter(h =>
+            h.walletAddress && h.walletAddress.toLowerCase() === wallet.address.toLowerCase()
+        );
+
+        // Simpan mapping: index di filtered → index di allHistory (untuk detail)
+        const filteredIndices = [];
+        allHistory.forEach((h, i) => {
+            if (h.walletAddress && h.walletAddress.toLowerCase() === wallet.address.toLowerCase()) {
+                filteredIndices.push(i);
+            }
+        });
+
         const limit = 5;
-        const total = history.length;
+        const total = filtered.length;
         const totalPages = Math.ceil(total / limit) || 1;
+        const truncated = `${wallet.address.slice(0, 6)}...${wallet.address.slice(-4)}`;
 
         if (total === 0) {
-            const keyboard = [[{ text: '🔙 Kembali', callback_data: 'tracker_menu' }]];
-            this.bot.sendMessage(chatId, `📜 *RIWAYAT TRACKING*\n\nBelum ada transaksi masuk yang terdeteksi.`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } });
+            const keyboard = [
+                [{ text: '🔙 Kembali ke Pilihan Wallet', callback_data: 'tracker_history_select' }]
+            ];
+            this.bot.sendMessage(chatId,
+                `📜 *RIWAYAT WALLET: ${wallet.name}*\n` +
+                `\`${truncated}\`\n\nBelum ada transaksi masuk yang terdeteksi untuk wallet ini.`,
+                { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } }
+            );
             return;
         }
 
         const startIndex = (page - 1) * limit;
-        const pageItems = history.slice(startIndex, startIndex + limit);
+        const pageItems = filtered.slice(startIndex, startIndex + limit);
 
         const keyboard = pageItems.map((item, idx) => {
-            const absoluteIndex = startIndex + idx;
+            const absoluteIndex = filteredIndices[startIndex + idx];
             const priceText = item.estimatedUsdt && item.estimatedUsdt !== 'Unknown' ? `~$${item.estimatedUsdt}` : '⚠️ $0';
             return [{
                 text: `⬇️ ${item.amount} ${item.tokenSymbol} (${priceText}) • ${item.networkName}`,
-                callback_data: `tracker_hist_detail_${absoluteIndex}`
+                callback_data: `tracker_hist_detail_${walletIdx}_${absoluteIndex}_${page}`
             }];
         });
 
         const navRow = [];
         if (page > 1) {
-            navRow.push({ text: '⬅️ Sebelumnya', callback_data: `tracker_history_${page - 1}` });
+            navRow.push({ text: '⬅️ Sebelumnya', callback_data: `tracker_history_view_${walletIdx}_${page - 1}` });
         }
         if (startIndex + limit < total) {
-            navRow.push({ text: 'Berikutnya ➡️', callback_data: `tracker_history_${page + 1}` });
+            navRow.push({ text: 'Berikutnya ➡️', callback_data: `tracker_history_view_${walletIdx}_${page + 1}` });
         }
         if (navRow.length > 0) {
             keyboard.push(navRow);
         }
 
-        keyboard.push([{ text: '🔙 Kembali ke Menu', callback_data: 'tracker_menu' }]);
+        keyboard.push([{ text: '🔙 Kembali ke Pilihan Wallet', callback_data: 'tracker_history_select' }]);
 
         this.bot.sendMessage(chatId,
-            `📜 *RIWAYAT TRACKING (Halaman ${page}/${totalPages})*\n\n` +
+            `📜 *RIWAYAT WALLET: ${wallet.name} (Hal. ${page}/${totalPages})*\n` +
+            `\`${truncated}\`\n\n` +
+            `Total: *${total} transaksi*\n` +
             `Pilih transaksi untuk melihat detail lengkap:`,
             { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } }
         );
     }
 
-    showTrackerHistoryDetail(chatId, index) {
+    showTrackerHistoryDetail(chatId, walletIdx, index, page = 1) {
         const history = this.getTrackerHistory(chatId);
         const item = history[index];
         if (!item) {
             this.bot.sendMessage(chatId, `❌ Detail transaksi tidak ditemukan.`);
-            this.showTrackerHistory(chatId, 1);
+            this.showTrackerHistorySelect(chatId);
             return;
         }
 
@@ -6705,9 +6777,9 @@ class TelegramFullController {
         if (explorerUrl) {
             keyboard.push([{ text: '🔗 Lihat di Explorer', url: explorerUrl }]);
         }
-        keyboard.push([{ text: '🔙 Kembali ke Riwayat', callback_data: 'tracker_history_1' }]);
+        keyboard.push([{ text: '🔙 Kembali ke Riwayat', callback_data: `tracker_history_view_${walletIdx}_${page}` }]);
 
-        const msgText = `📋 *DETAIL TRACKING #${parseInt(index) + 1}*\n\n` +
+        const msgText = `📋 *DETAIL TRANSAKSI*\n\n` +
             `💼 *Wallet:* \`${item.walletName}\` (\`${item.walletAddress.slice(0, 6)}...${item.walletAddress.slice(-4)}\`)\n` +
             `🌐 *Jaringan:* \`${item.networkName}\` (Chain ID: ${TRACKER_NETWORKS[item.networkKey]?.chainId || '-'})\n\n` +
             `🪙 *Token:* ${item.tokenName} (${item.tokenSymbol})\n` +
