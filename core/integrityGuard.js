@@ -111,6 +111,42 @@ class IntegrityGuard {
         return null;
     }
 
+    _calculateEnvHash() {
+        if (!fs.existsSync(this.envPath)) return null;
+        try {
+            const content = fs.readFileSync(this.envPath);
+            return crypto.createHash('sha256').update(content).digest('hex');
+        } catch (e) {
+            return null;
+        }
+    }
+
+    _getApprovedEnvHash() {
+        if (fs.existsSync(this.lockFilePath)) {
+            try {
+                const data = JSON.parse(fs.readFileSync(this.lockFilePath, 'utf8'));
+                return data.approvedEnvHash || null;
+            } catch (e) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    _saveApprovedEnvHash(envHash) {
+        try {
+            let data = {};
+            if (fs.existsSync(this.lockFilePath)) {
+                data = JSON.parse(fs.readFileSync(this.lockFilePath, 'utf8'));
+            }
+            data.approvedEnvHash = envHash;
+            data.updatedAt = new Date().toISOString();
+            fs.writeFileSync(this.lockFilePath, JSON.stringify(data, null, 2));
+        } catch (e) {
+            console.warn('⚠️ Gagal menyimpan env hash:', e.message);
+        }
+    }
+
     _loadEncryptionSalt(approvedHash) {
         if (!fs.existsSync(this.envPath)) return null;
         try {
@@ -393,8 +429,10 @@ class IntegrityGuard {
     }
 
     saveNewApprovedHash(hash, adminPassword) {
+        const envHash = this._calculateEnvHash();
         fs.writeFileSync(this.lockFilePath, JSON.stringify({
             approvedHash: hash,
+            approvedEnvHash: envHash,
             updatedAt: new Date().toISOString()
         }, null, 2));
 
@@ -640,6 +678,68 @@ class IntegrityGuard {
                     process.exit(1);
                 }
             }
+        }
+
+        // === CEK PERUBAHAN FILE .env ===
+        // Deteksi jika .env diubah via menu Telegram Controller atau cara lain
+        const currentEnvHash = this._calculateEnvHash();
+        const approvedEnvHash = this._getApprovedEnvHash();
+
+        if (currentEnvHash && approvedEnvHash && currentEnvHash !== approvedEnvHash) {
+            console.log('\n\x1b[38;5;214m⚙️  Perubahan konfigurasi .env terdeteksi!\x1b[0m');
+            console.log('File .env telah dimodifikasi sejak terakhir kali Bot Utama dijalankan.');
+
+            let envVerified = false;
+
+            // Coba verifikasi lewat Controller Bot
+            console.log('🔄 Menghubungi Controller Bot untuk verifikasi OTP via Telegram...');
+            const envControllerResult = await this._requestOtpFromController('config_changed');
+
+            if (envControllerResult.verified) {
+                console.log('✅ Verifikasi OTP disetujui via Telegram.');
+                envVerified = true;
+            } else if (envControllerResult.reason !== 'controller_offline') {
+                console.error(`\x1b[38;5;203m❌ ACCESS DENIED: Verifikasi Telegram gagal (${envControllerResult.reason || 'Ditolak'}). Bot ditutup.\x1b[0m`);
+                process.exit(1);
+            } else {
+                // Fallback ke prompt terminal manual
+                console.log('ℹ️  Controller Bot offline. Fallback ke verifikasi terminal...');
+
+                const currentApprovedHash = this.getApprovedHash() || '';
+                const setup2FASecret = this._readSetup2FASecret(currentApprovedHash);
+
+                if (setup2FASecret) {
+                    console.log('\x1b[38;5;51m📱 Buka Google Authenticator → [Fastarx Bot - Setup]\x1b[0m');
+                    const otpInput = await this._promptOTP('\x1b[38;5;141m🔑 Masukkan kode 6 digit OTP untuk mengonfirmasi perubahan .env: \x1b[0m');
+                    if (!this._verifyOTPInline(setup2FASecret, otpInput)) {
+                        console.error('\x1b[38;5;203m❌ ACCESS DENIED: Kode OTP salah! Bot ditutup.\x1b[0m');
+                        process.exit(1);
+                    }
+                    envVerified = true;
+                } else {
+                    console.log('\x1b[38;5;214m⚠️  Setup-2FA belum dikonfigurasi. Menggunakan Password Admin.\x1b[0m');
+                    const currentApproved = this.getApprovedHash() || '';
+                    const adminPassword = this._loadAdminPasswordFromMarker(currentApproved);
+                    if (!adminPassword) {
+                        console.error('❌ ERROR: Master password tidak dapat dimuat. Bot dikunci.');
+                        process.exit(1);
+                    }
+                    const input = await this._promptPassword('🔑 Masukkan Password Admin untuk mengonfirmasi perubahan .env: ');
+                    if (input !== adminPassword) {
+                        console.error('❌ ACCESS DENIED: Password salah! Bot ditutup.');
+                        process.exit(1);
+                    }
+                    envVerified = true;
+                }
+            }
+
+            if (envVerified) {
+                this._saveApprovedEnvHash(currentEnvHash);
+                console.log('\x1b[38;5;46m✅ Perubahan konfigurasi .env berhasil diverifikasi!\x1b[0m');
+            }
+        } else if (currentEnvHash && !approvedEnvHash) {
+            // Pertama kali — simpan hash .env tanpa minta verifikasi
+            this._saveApprovedEnvHash(currentEnvHash);
         }
     }
 }

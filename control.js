@@ -637,6 +637,9 @@ function scheduleAutoRestart(chatId) {
                     } catch (err) {
                         console.error('⚠️ Gagal membersihkan environment variables:', err.message);
                     }
+                    if (isPkg) {
+                        cleanEnv.PKG_EXECPATH = '';
+                    }
 
                     const child = spawn(process.argv[0], process.argv.slice(1), {
                         detached: true,
@@ -1115,7 +1118,7 @@ function startBotProcess(chatId, botId) {
     console.log(`Working Directory: ${config.cwd}`);
     bot.sendMessage(chatId, `🔄 Menjalankan ${config.name}...`).catch(() => { });
 
-    const botProcess = spawn(config.command, isPkg ? [] : config.args, {
+    const botProcess = spawn(config.command, isPkg ? [process.argv[1]] : config.args, {
         stdio: ['ignore', 'inherit', 'inherit'],
         cwd: config.cwd,
         env: spawnEnv
