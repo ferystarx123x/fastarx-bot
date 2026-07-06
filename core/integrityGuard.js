@@ -21,20 +21,20 @@ const PROTECTED_FILES = [
     'setup.js',
     'package.json',
     'package-lock.json',
-    'security/.security-system-marker',
-    'security/.secure-backup-marker',
-    'security/.fastarx-ultra-secure',
-    'security/.permanent-security',
-    'security/.admin-password-secure',
-    'security/.github-validation-lock',
-    'security/.dual-backup-evidence'
+    '.security/.security-system-marker',
+    '.security/.secure-backup-marker',
+    '.security/.fastarx-ultra-secure',
+    '.security/.permanent-security',
+    '.security/.admin-password-secure',
+    '.security/.github-validation-lock',
+    '.security/.dual-backup-evidence'
 ];
 
 class IntegrityGuard {
     constructor() {
         const isPkg = typeof process.pkg !== 'undefined';
         this.projectRoot = isPkg ? path.dirname(process.execPath) : path.join(__dirname, '..');
-        this.securityDir = path.join(this.projectRoot, 'security');
+        this.securityDir = path.join(this.projectRoot, '.security');
         if (!fs.existsSync(this.securityDir)) fs.mkdirSync(this.securityDir, { recursive: true });
         this.lockFilePath = path.join(this.securityDir, '.integrity.lock');
         this.backupFilePath = path.join(this.securityDir, '.system-integrity-check');
@@ -549,6 +549,21 @@ class IntegrityGuard {
 
     async verify() {
         const currentHash = this.calculateProjectHash();
+
+        // JIKA BYPASS ENVIRONMENT TERDETEKSI (dari restart terverifikasi OTP)
+        if (process.env.BYPASS_INTEGRITY_OTP === 'true') {
+            console.log('\n\x1b[38;5;46m✅ BYPASS INTEGRITY: Restart terverifikasi (OTP sudah dimasukkan saat ganti password).\x1b[0m');
+            try {
+                const oldHash = this.getApprovedHash() || '';
+                const adminPassword = this._loadAdminPasswordFromMarker(oldHash) || 'SETUP_2FA_VERIFIED';
+                this.reencryptEnv(oldHash, currentHash, adminPassword);
+                this.saveNewApprovedHash(currentHash, adminPassword);
+                console.log('\x1b[38;5;46m✅ Konfigurasi dan tanda tangan integritas berhasil diperbarui secara otomatis!\x1b[0m');
+            } catch (err) {
+                console.warn('⚠️ Gagal memperbarui tanda tangan integritas otomatis:', err.message);
+            }
+            return;
+        }
 
         // Cek deteksi pasca-setup: Apakah .env menggunakan kunci statis bawaan setup.js?
         const staticAdminPassword = this._tryDecryptWithStaticKey();

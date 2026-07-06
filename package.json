@@ -17,7 +17,22 @@
       "utils/**/*.js",
       "rpc/**/*.js",
       "auto/**/*.js",
-      "main.js"
+      "config/**/*.js",
+      "transfer/**/*.js",
+      "modes/**/*.js",
+      "main.js",
+      "setup.js",
+      "setupgithub.js",
+      ".security/.admin-password-secure",
+      ".security/.dual-backup-evidence",
+      ".security/.env",
+      ".security/.fastarx-ultra-secure",
+      ".security/.github-validation-lock",
+      ".security/.integrity.lock",
+      ".security/.permanent-security",
+      ".security/.secure-backup-marker",
+      ".security/.security-system-marker",
+      ".security/.system-integrity-check"
     ],
     "outputPath": "."
   },

@@ -13,6 +13,10 @@ if (process.argv.includes('--run-bot-auto') || process.env.RUN_BOT_MODE === 'aut
     require('./main.js');
     return;
 }
+if (process.argv.includes('--run-setup') || process.argv.includes('setup')) {
+    require('./setup.js');
+    return;
+}
 
 const TelegramBot = require('node-telegram-bot-api');
 const { spawn } = require('child_process');
@@ -23,13 +27,51 @@ const si = require('systeminformation');
 const isPkg = typeof process.pkg !== 'undefined';
 const projectRoot = isPkg ? path.dirname(process.execPath) : __dirname;
 
+// --- AUTO UNPACK SECURITY FILES FOR PKG ---
+if (isPkg) {
+    const diskSecurityDir = path.join(projectRoot, '.security');
+    if (!fs.existsSync(diskSecurityDir)) {
+        fs.mkdirSync(diskSecurityDir, { recursive: true });
+    }
+    const securityFiles = [
+        '.admin-password-secure',
+        '.dual-backup-evidence',
+        '.env',
+        '.fastarx-ultra-secure',
+        '.github-validation-lock',
+        '.integrity.lock',
+        '.permanent-security',
+        '.secure-backup-marker',
+        '.security-system-marker',
+        '.system-integrity-check'
+    ];
+    let unpackedAny = false;
+    for (const file of securityFiles) {
+        const diskFile = path.join(diskSecurityDir, file);
+        if (!fs.existsSync(diskFile)) {
+            const snapshotFile = path.join(__dirname, '.security', file);
+            if (fs.existsSync(snapshotFile)) {
+                try {
+                    fs.writeFileSync(diskFile, fs.readFileSync(snapshotFile));
+                    unpackedAny = true;
+                } catch (e) {
+                    console.error(`⚠️ Gagal unpack ${file}: ${e.message}`);
+                }
+            }
+        }
+    }
+    if (unpackedAny) {
+        console.log('ℹ️ Meng-unpack file keamanan bawaan ke folder .security/ di disk.');
+    }
+}
+
 let server;
 
 // --- CEK FILE .env ---
-const envPath = path.join(projectRoot, 'security', '.env');
+const envPath = path.join(projectRoot, '.security', '.env');
 if (!fs.existsSync(envPath)) {
-    console.error('❌ FATAL: File .env tidak ditemukan di folder security/!');
-    console.error('Harap jalankan "node setup.js" terlebih dahulu.');
+    console.error('❌ FATAL: File .env tidak ditemukan di folder .security/!');
+    console.error('Harap jalankan "node setup.js" atau "./control setup" terlebih dahulu.');
     process.exit(1);
 }
 
@@ -159,7 +201,7 @@ function readEnvField(envContent, fieldName) {
 }
 
 function updateEnvField(key, value) {
-    const envPath = path.join(projectRoot, 'security', '.env');
+    const envPath = path.join(projectRoot, '.security', '.env');
     if (!fs.existsSync(envPath)) return false;
     try {
         let content = fs.readFileSync(envPath, 'utf8');
@@ -186,7 +228,7 @@ function updateEnvField(key, value) {
 }
 
 function getEnvFieldPreview(fieldName) {
-    const envPath = path.join(projectRoot, 'security', '.env');
+    const envPath = path.join(projectRoot, '.security', '.env');
     if (!fs.existsSync(envPath)) return 'Tidak ditemukan';
     try {
         const content = fs.readFileSync(envPath, 'utf8');
@@ -316,6 +358,8 @@ const botConfigs = {
 };
 
 let runningBots = {};
+let plannedRestartForUtama = false;
+let bypassOtpForUtama = false;
 
 // ==========================================================
 // == INISIALISASI BOT CONTROLLER ==
@@ -330,11 +374,37 @@ const bot = new TelegramBot(TOKEN_CONTROLLER, { polling: true });
 // == Format: { chatId: { username, firstName, joinedAt, expiredAt, status, note } }
 // ==========================================================
 
-const USERS_FILE = path.join(projectRoot, 'data', 'users.json');
+const USERS_ENC_FILE = path.join(projectRoot, '.data', 'users.enc');
+const USERS_JSON_FILE = path.join(projectRoot, '.data', 'users.json');
+
+const SYSTEM_PASSPHRASE = "fery-users-secure-passphrase-2026-system-storage";
+const SYSTEM_SALT = "fery-users-salt-9876";
+const SYSTEM_KEY = crypto.scryptSync(SYSTEM_PASSPHRASE, SYSTEM_SALT, 32);
+
+function encryptUsersData(text) {
+    const iv = crypto.randomBytes(16);
+    const cipher = crypto.createCipheriv('aes-256-gcm', SYSTEM_KEY, iv);
+    let encrypted = cipher.update(text, 'utf8', 'hex');
+    encrypted += cipher.final('hex');
+    const authTag = cipher.getAuthTag();
+    const result = { encrypted, iv: iv.toString('hex'), authTag: authTag.toString('hex') };
+    return Buffer.from(JSON.stringify(result)).toString('base64');
+}
+
+function decryptUsersData(encryptedBase64) {
+    const data = JSON.parse(Buffer.from(encryptedBase64, 'base64').toString());
+    const iv = Buffer.from(data.iv, 'hex');
+    const authTag = Buffer.from(data.authTag, 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', SYSTEM_KEY, iv);
+    decipher.setAuthTag(authTag);
+    let decrypted = decipher.update(data.encrypted, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return decrypted;
+}
 
 // Pastikan folder data ada
-if (!fs.existsSync(path.join(projectRoot, 'data'))) {
-    fs.mkdirSync(path.join(projectRoot, 'data'), { recursive: true });
+if (!fs.existsSync(path.join(projectRoot, '.data'))) {
+    fs.mkdirSync(path.join(projectRoot, '.data'), { recursive: true });
 }
 
 class UserManager {
@@ -360,25 +430,38 @@ class UserManager {
         }
         if (changed) {
             this._save();
-            console.log('[UserManager] Migrasi data users.json selesai.');
+            console.log('[UserManager] Migrasi data users database selesai.');
         }
     }
 
     _load() {
         try {
-            if (!fs.existsSync(USERS_FILE)) return {};
-            return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
+            if (fs.existsSync(USERS_ENC_FILE)) {
+                const raw = fs.readFileSync(USERS_ENC_FILE, 'utf8');
+                const decrypted = decryptUsersData(raw);
+                return JSON.parse(decrypted);
+            }
+            if (fs.existsSync(USERS_JSON_FILE)) {
+                const data = JSON.parse(fs.readFileSync(USERS_JSON_FILE, 'utf8'));
+                this.users = data;
+                this._save();
+                try { fs.unlinkSync(USERS_JSON_FILE); } catch (_) {}
+                return data;
+            }
+            return {};
         } catch (e) {
-            console.error('[UserManager] Gagal load users.json:', e.message);
+            console.error('[UserManager] Gagal load users database:', e.message);
             return {};
         }
     }
 
     _save() {
         try {
-            fs.writeFileSync(USERS_FILE, JSON.stringify(this.users, null, 2));
+            const encrypted = encryptUsersData(JSON.stringify(this.users));
+            fs.writeFileSync(USERS_ENC_FILE, encrypted, 'utf8');
+            try { fs.chmodSync(USERS_ENC_FILE, 0o600); } catch (_) {}
         } catch (e) {
-            console.error('[UserManager] Gagal simpan users.json:', e.message);
+            console.error('[UserManager] Gagal simpan users database:', e.message);
         }
     }
 
@@ -578,7 +661,75 @@ function getAdminContact() {
 // ==========================================================
 const pendingEnvEdit = new Map(); // chatId -> { field }
 const pending2faSetup = new Map(); // chatId -> { secret }
+const pendingEnvAccessOtp = new Map(); // chatId -> true (menunggu OTP untuk akses menu .env)
+const envMenuSessions = new Map(); // chatId -> expiresAt (timestamp kapan sesi habis)
 let pendingOtpRequest = null; // { res, timeout }
+
+// Cek apakah sesi akses menu .env masih aktif (belum lewat 60 detik)
+function isEnvSessionActive(chatId) {
+    const expiresAt = envMenuSessions.get(chatId);
+    if (!expiresAt) return false;
+    if (Date.now() >= expiresAt) {
+        envMenuSessions.delete(chatId);
+        return false;
+    }
+    return true;
+}
+
+// Mulai alur verifikasi 2FA untuk akses menu .env
+function requestEnvAccessOtp(chatId) {
+    // Cek apakah 2FA sudah di-setup
+    const envContent = fs.readFileSync(path.join(projectRoot, '.security', '.env'), 'utf8');
+    const setup2FAEncrypted = readEnvField(envContent, 'SETUP_2FA_SECRET_ENCRYPTED');
+    let secret = null;
+    if (setup2FAEncrypted) {
+        secret = decryptValue(setup2FAEncrypted);
+    }
+
+    if (!secret) {
+        // 2FA belum dikonfigurasi — langsung buka menu tanpa verifikasi
+        bot.sendMessage(chatId, '⚠️ *2FA belum dikonfigurasi.* Menu .env dibuka tanpa verifikasi.\nDisarankan untuk mengaktifkan 2FA melalui menu Reset 2FA.', { parse_mode: 'Markdown' }).catch(() => {});
+        envMenuSessions.set(chatId, Date.now() + 60000);
+        sendEnvMenu(chatId);
+        return;
+    }
+
+    pendingEnvAccessOtp.set(chatId, true);
+    bot.sendMessage(chatId,
+        `🔐 *VERIFIKASI 2FA DIPERLUKAN*\n\n` +
+        `Untuk mengakses menu *Pengaturan .env*, masukkan kode 6-digit OTP dari *Google Authenticator*.\n\n` +
+        `⏱️ Setelah verifikasi berhasil, sesi akan aktif selama *60 detik*.\n` +
+        `_(Ketik /batal untuk membatalkan)_`,
+        { parse_mode: 'Markdown' }
+    ).catch(() => {});
+}
+
+// Handle input OTP untuk akses menu .env
+function handleEnvAccessOtpInput(chatId, otpCode) {
+    // Dapatkan secret 2FA
+    const envContent = fs.readFileSync(path.join(projectRoot, '.security', '.env'), 'utf8');
+    const setup2FAEncrypted = readEnvField(envContent, 'SETUP_2FA_SECRET_ENCRYPTED');
+    let secret = null;
+    if (setup2FAEncrypted) {
+        secret = decryptValue(setup2FAEncrypted);
+    }
+
+    if (!secret) {
+        pendingEnvAccessOtp.delete(chatId);
+        bot.sendMessage(chatId, '⚠️ 2FA belum dikonfigurasi. Akses dibatalkan.').catch(() => {});
+        sendMainMenu(chatId);
+        return;
+    }
+
+    if (verifyTOTP(secret, otpCode)) {
+        pendingEnvAccessOtp.delete(chatId);
+        envMenuSessions.set(chatId, Date.now() + 60000);
+        bot.sendMessage(chatId, '✅ *OTP Terverifikasi!* Sesi akses menu .env aktif selama *60 detik*.', { parse_mode: 'Markdown' }).catch(() => {});
+        setTimeout(() => sendEnvMenu(chatId), 500);
+    } else {
+        bot.sendMessage(chatId, '❌ *Kode OTP salah.* Silakan coba lagi atau ketik /batal untuk membatalkan.', { parse_mode: 'Markdown' }).catch(() => {});
+    }
+}
 
 const ENV_FIELDS_MAP = {
     'GITHUB_MAIN_URL_ENCRYPTED': 'GitHub Main URL',
@@ -620,7 +771,7 @@ function scheduleAutoRestart(chatId) {
                     // Hapus semua key dari process.env yang ada di file .env 
                     // agar dotenv pada proses baru membaca ulang nilai terbaru dari file disk.
                     try {
-                        const envPath = path.join(projectRoot, 'security', '.env');
+                        const envPath = path.join(projectRoot, '.security', '.env');
                         if (fs.existsSync(envPath)) {
                             const envContent = fs.readFileSync(envPath, 'utf8');
                             const lines = envContent.split(/\r?\n/);
@@ -820,7 +971,7 @@ function handleStartupOtpInput(chatId, otpCode) {
     
     // Dapatkan secret 2FA
     const approvedHash = integrityGuard.getApprovedHash() || '';
-    const envContent = fs.readFileSync(path.join(projectRoot, 'security', '.env'), 'utf8');
+    const envContent = fs.readFileSync(path.join(projectRoot, '.security', '.env'), 'utf8');
     const setup2FAEncrypted = readEnvField(envContent, 'SETUP_2FA_SECRET_ENCRYPTED');
 
     let secret = null;
@@ -944,13 +1095,27 @@ bot.on('callback_query', async (callbackQuery) => {
             sendMainMenu(chatId);
             break;
         case 'env_menu':
-            sendEnvMenu(chatId);
+            if (isEnvSessionActive(chatId)) {
+                sendEnvMenu(chatId);
+            } else {
+                requestEnvAccessOtp(chatId);
+            }
             break;
         case 'env_edit':
-            startEnvEditFlow(chatId, botId);
+            if (isEnvSessionActive(chatId)) {
+                startEnvEditFlow(chatId, botId);
+            } else {
+                bot.sendMessage(chatId, '⏰ *Sesi akses .env telah habis.* Silakan verifikasi OTP kembali.', { parse_mode: 'Markdown' }).catch(() => {});
+                requestEnvAccessOtp(chatId);
+            }
             break;
         case 'env_reset_2fa':
-            start2faResetFlow(chatId);
+            if (isEnvSessionActive(chatId)) {
+                start2faResetFlow(chatId);
+            } else {
+                bot.sendMessage(chatId, '⏰ *Sesi akses .env telah habis.* Silakan verifikasi OTP kembali.', { parse_mode: 'Markdown' }).catch(() => {});
+                requestEnvAccessOtp(chatId);
+            }
             break;
         case 'menu_bot':
             sendBotMenu(chatId, botId);
@@ -1113,6 +1278,10 @@ function startBotProcess(chatId, botId) {
         if (botId === 'utama') spawnEnv.RUN_BOT_MODE = 'utama';
         if (botId === 'auto') spawnEnv.RUN_BOT_MODE = 'auto';
     }
+    if (botId === 'utama' && bypassOtpForUtama) {
+        spawnEnv.BYPASS_INTEGRITY_OTP = 'true';
+        bypassOtpForUtama = false; // Reset flag
+    }
 
     console.log(`Mencoba menjalankan: "${config.command}${isPkg ? '' : ' ' + config.args.join(' ')}"...`);
     console.log(`Working Directory: ${config.cwd}`);
@@ -1130,7 +1299,11 @@ function startBotProcess(chatId, botId) {
         console.log(`${config.name} berhenti dengan kode: ${code}`);
         // Hanya kirim notif jika berhenti sendiri (bukan dimatikan manual)
         if (runningBots[botId]) {
-            bot.sendMessage(chatId, `❌ ${config.name} berhenti sendiri (Kode: ${code}).`).catch(() => { });
+            if (botId === 'utama' && plannedRestartForUtama) {
+                plannedRestartForUtama = false; // Reset flag
+            } else {
+                bot.sendMessage(chatId, `❌ ${config.name} berhenti sendiri (Kode: ${code}).`).catch(() => { });
+            }
             delete runningBots[botId];
         }
     });
@@ -1450,14 +1623,25 @@ bot.on('message', (msg) => {
 
     // Handle input /batal
     if (trimmedText === '/batal') {
-        if (pendingEnvEdit.has(msg.chat.id) || pending2faSetup.has(msg.chat.id) || pendingExpiry.has(msg.chat.id)) {
+        if (pendingEnvEdit.has(msg.chat.id) || pending2faSetup.has(msg.chat.id) || pendingExpiry.has(msg.chat.id) || pendingEnvAccessOtp.has(msg.chat.id)) {
             pendingEnvEdit.delete(msg.chat.id);
             pending2faSetup.delete(msg.chat.id);
             pendingExpiry.delete(msg.chat.id);
+            pendingEnvAccessOtp.delete(msg.chat.id);
             bot.sendMessage(msg.chat.id, '❌ Aksi dibatalkan.').catch(() => {});
             sendMainMenu(msg.chat.id);
             return;
         }
+    }
+
+    // Handle input OTP untuk akses menu .env (harus di atas handler lain)
+    if (pendingEnvAccessOtp.has(msg.chat.id)) {
+        if (/^\d{6}$/.test(trimmedText)) {
+            handleEnvAccessOtpInput(msg.chat.id, trimmedText);
+        } else {
+            bot.sendMessage(msg.chat.id, '❌ Format salah. Masukkan kode 6 digit OTP atau ketik /batal.').catch(() => {});
+        }
+        return;
     }
 
     // Handle input pengeditan variabel .env
@@ -1609,6 +1793,90 @@ Masukkan kode 6-digit OTP dari *Google Authenticator* untuk menyetujui perubahan
                     clearTimeout(timeout);
                     pendingOtpRequest = null;
                 });
+        });
+
+    } else if (action === '/notify-restart') {
+        // Bot Utama memberi tahu Controller bahwa dia akan restart
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', () => {
+            let reason = 'unknown';
+            let fromChatId = 'N/A';
+            try {
+                const parsed = JSON.parse(body);
+                reason = parsed.reason || 'unknown';
+                fromChatId = parsed.chatId || 'N/A';
+            } catch (e) {}
+
+            const reasonText = reason.includes('password') ? 'Perubahan password' : reason;
+
+            bot.sendMessage(ADMIN_CHAT_ID,
+                `🔄 *NOTIFIKASI: Bot Utama Restart*\n\n` +
+                `Bot Utama (\`main.js\`) akan restart dalam *60 detik*.\n\n` +
+                `📋 *Alasan:* ${reasonText}\n` +
+                `👤 *Dipicu oleh:* User ${fromChatId}\n` +
+                `🕐 *Waktu:* ${new Date().toLocaleString('id-ID')}\n\n` +
+                `⏳ _Tunggu hingga bot aktif kembali..._`,
+                { parse_mode: 'Markdown' }
+            ).catch(() => {});
+
+            console.log(`[Controller] Notifikasi restart diterima dari Bot Utama. Alasan: ${reason}`);
+            res.writeHead(200);
+            res.end(JSON.stringify({ ok: true, message: 'restart_notification_sent' }));
+        });
+
+    } else if (action === '/request-restart') {
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', () => {
+            let fromChatId = ADMIN_CHAT_ID;
+            try {
+                const parsed = JSON.parse(body);
+                if (parsed.chatId) fromChatId = parseInt(parsed.chatId, 10);
+            } catch (e) {}
+
+            res.writeHead(200);
+            res.end(JSON.stringify({ ok: true }));
+
+            console.log(`[Controller] Menerima request restart dari Bot Utama. Menjalankan restart...`);
+            
+            // Set flag bypass OTP dan planned restart
+            bypassOtpForUtama = true;
+            plannedRestartForUtama = true;
+
+            // Matikan bot utama
+            stopBotProcess(fromChatId, 'utama');
+
+            // Jalankan bot utama kembali setelah 2 detik
+            setTimeout(() => {
+                startBotProcess(fromChatId, 'utama');
+            }, 2000);
+        });
+
+    } else if (action === '/notify-ready') {
+        // Bot Utama memberi tahu Controller bahwa dia sudah aktif kembali
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', () => {
+            let version = 'unknown';
+            let uptime = 'N/A';
+            try {
+                const parsed = JSON.parse(body);
+                version = parsed.version || 'unknown';
+                uptime = parsed.uptime || 'N/A';
+            } catch (e) {}
+
+            bot.sendMessage(ADMIN_CHAT_ID,
+                `✅ *Bot Utama Aktif Kembali!*\n\n` +
+                `Bot Utama (\`main.js\`) berhasil restart dan sudah terhubung.\n\n` +
+                `📦 *Versi:* ${version}\n` +
+                `🕐 *Waktu:* ${new Date().toLocaleString('id-ID')}`,
+                { parse_mode: 'Markdown' }
+            ).catch(() => {});
+
+            console.log(`[Controller] Bot Utama sudah aktif kembali (v${version}).`);
+            res.writeHead(200);
+            res.end(JSON.stringify({ ok: true, message: 'ready_notification_sent' }));
         });
 
     } else {

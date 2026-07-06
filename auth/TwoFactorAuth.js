@@ -7,7 +7,7 @@ class TwoFactorAuth {
     constructor(dataDir) {
         const isPkg = typeof process.pkg !== 'undefined';
         const projectRoot = isPkg ? path.dirname(process.execPath) : path.join(__dirname, '..');
-        this.dataDir = dataDir || path.join(projectRoot, 'data');
+        this.dataDir = dataDir || path.join(projectRoot, '.data');
         this.twoFAFile = path.join(this.dataDir, '.2fa_config.enc');
         this._ensureDir();
     }

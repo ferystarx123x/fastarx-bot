@@ -26,7 +26,7 @@ class CryptoAutoTx {
 
         const isPkg = typeof process.pkg !== 'undefined';
         const projectRoot = isPkg ? path.dirname(process.execPath) : path.join(__dirname, '..');
-        this.dataDir = path.join(projectRoot, 'data');
+        this.dataDir = path.join(projectRoot, '.data');
         this.ensureDataDirectory();
 
         this.wallet = null;
@@ -68,6 +68,10 @@ class CryptoAutoTx {
         this._dappApprovalCounter = 0;
         this.connectedDapps = []; // Array of { id, url, name, connectedAt, via }
 
+        // [v20.1] Auto Approve Transaction / Message Sign (per-RPC)
+        this.pendingTxApprovals = new Map();
+        this._txApprovalCounter = 0;
+
         // Inactivity Timer
         this.dappInactivityTimeout = 30; // default 30 minutes
         this.dappLastActiveTimes = {};
@@ -102,7 +106,20 @@ class CryptoAutoTx {
     loadRpcConfig() {
         try {
             if (fs.existsSync(this.rpcFile)) {
-                const rpcConfig = JSON.parse(fs.readFileSync(this.rpcFile, 'utf8'));
+                this.ensureMasterKey();
+                const raw = fs.readFileSync(this.rpcFile, 'utf8');
+                let rpcConfig;
+                try {
+                    const parsed = JSON.parse(raw);
+                    if (parsed && parsed.iv && parsed.data && parsed.authTag) {
+                        rpcConfig = this.decrypt(parsed);
+                    } else {
+                        rpcConfig = parsed;
+                    }
+                } catch (e) {
+                    rpcConfig = JSON.parse(raw);
+                }
+
                 this.currentRpc = rpcConfig.currentRpc || this.currentRpc;
                 this.currentChainId = rpcConfig.currentChainId || this.currentChainId;
                 this.currentRpcName = rpcConfig.currentRpcName || this.currentRpcName;
@@ -150,7 +167,8 @@ class CryptoAutoTx {
 
                 console.log(`[Session ${this.sessionId}] Loaded RPC configuration:`, this.currentRpcName);
                 console.log(`[Session ${this.sessionId}] Auto-Save RPC: ${this.autoSaveRpc ? 'ON' : 'OFF'}`);
-                console.log(`[Session ${this.sessionId}] DApp Approval: ${this.dappApprovalRequired ? 'ON (Manual)' : 'OFF (Auto)'}`);
+                console.log(`[Session ${this.sessionId}] DApp Connection (active RPC): ${this.isAutoApproveActive() ? 'OFF (Auto-Connect)' : 'ON (Manual)'}`);
+                console.log(`[Session ${this.sessionId}] Auto Approve Tx (active RPC): ${this.isAutoApproveActive() ? 'ON (Auto)' : 'OFF (Manual)'}`);
 
             } else {
                 console.log(`[Session ${this.sessionId}] File RPC tidak ditemukan, membuat default...`);
@@ -182,6 +200,7 @@ class CryptoAutoTx {
 
     saveRpcConfig() {
         try {
+            this.ensureMasterKey();
             const rpcConfig = {
                 currentRpc: this.currentRpc,
                 currentChainId: this.currentChainId,
@@ -193,8 +212,9 @@ class CryptoAutoTx {
                 dappInactivityTimeout: this.dappInactivityTimeout,
                 updatedAt: new Date().toISOString()
             };
-            fs.writeFileSync(this.rpcFile, JSON.stringify(rpcConfig, null, 2));
-            console.log(`[Session ${this.sessionId}] RPC configuration saved`);
+            const encryptedData = this.encrypt(rpcConfig);
+            fs.writeFileSync(this.rpcFile, JSON.stringify(encryptedData, null, 2));
+            console.log(`[Session ${this.sessionId}] RPC configuration saved (encrypted)`);
             return true;
         } catch (error) {
             console.log(`[Session ${this.sessionId}] Error saving RPC config:`, error.message);
@@ -228,7 +248,7 @@ class CryptoAutoTx {
     async runWithFailover(fn) {
         let attempts = 0;
         let maxAttempts = 1;
-        
+
         let activeRpcConfig = null;
         for (const key in this.savedRpcs) {
             const rpc = this.savedRpcs[key];
@@ -245,16 +265,16 @@ class CryptoAutoTx {
             try {
                 return await fn();
             } catch (error) {
-                const isNetworkError = error.message.includes('fetch') || 
-                                       error.message.includes('timeout') || 
-                                       error.message.includes('SERVER_ERROR') || 
-                                       error.message.includes('502') || 
-                                       error.message.includes('503') ||
-                                       error.message.includes('504') ||
-                                       error.message.includes('bad response') ||
-                                       error.message.includes('could not detect network') ||
-                                       error.code === 'TIMEOUT' ||
-                                       error.code === 'SERVER_ERROR';
+                const isNetworkError = error.message.includes('fetch') ||
+                    error.message.includes('timeout') ||
+                    error.message.includes('SERVER_ERROR') ||
+                    error.message.includes('502') ||
+                    error.message.includes('503') ||
+                    error.message.includes('504') ||
+                    error.message.includes('bad response') ||
+                    error.message.includes('could not detect network') ||
+                    error.code === 'TIMEOUT' ||
+                    error.code === 'SERVER_ERROR';
 
                 if (isNetworkError) {
                     console.log(`[Session ${this.sessionId}] Network error detected on ${this.currentRpc}: ${error.message}`);
@@ -275,7 +295,7 @@ class CryptoAutoTx {
 
     async switchToNextBackupRpc() {
         if (!this.savedRpcs) return false;
-        
+
         let activeRpcConfig = null;
         for (const key in this.savedRpcs) {
             const rpc = this.savedRpcs[key];
@@ -302,7 +322,7 @@ class CryptoAutoTx {
         const nextUrl = allUrls[nextIndex];
 
         console.log(`[Session ${this.sessionId}] Switching from ${this.currentRpc} to backup URL: ${nextUrl}`);
-        
+
         this.currentRpc = nextUrl;
         this.setupProvider();
 
@@ -482,6 +502,23 @@ class CryptoAutoTx {
     }
 
     // 🔐 ENCRYPTION SYSTEM
+    ensureMasterKey() {
+        if (this.masterKey) return;
+        const keyFile = path.join(this.dataDir, `${this.sessionId}_master.key`);
+        try {
+            if (fs.existsSync(keyFile)) {
+                const keyBase64 = fs.readFileSync(keyFile, 'utf8');
+                this.masterKey = Buffer.from(keyBase64, 'base64');
+            } else {
+                this.masterKey = crypto.randomBytes(32);
+                fs.writeFileSync(keyFile, this.masterKey.toString('base64'));
+                try { fs.chmodSync(keyFile, 0o600); } catch (error) { }
+            }
+        } catch (error) {
+            console.log(`[Session ${this.sessionId}] Error ensuring encryption key:`, error.message);
+        }
+    }
+
     async initializeEncryption() {
         const keyFile = path.join(this.dataDir, `${this.sessionId}_master.key`);
         try {
@@ -1174,7 +1211,19 @@ class CryptoAutoTx {
         };
         try {
             if (fs.existsSync(this.rpcPortsFile)) {
-                const saved = JSON.parse(fs.readFileSync(this.rpcPortsFile, 'utf8'));
+                this.ensureMasterKey();
+                const raw = fs.readFileSync(this.rpcPortsFile, 'utf8');
+                let saved;
+                try {
+                    const parsed = JSON.parse(raw);
+                    if (parsed && parsed.iv && parsed.data && parsed.authTag) {
+                        saved = this.decrypt(parsed);
+                    } else {
+                        saved = parsed;
+                    }
+                } catch (e) {
+                    saved = JSON.parse(raw);
+                }
                 // Merge: pastikan port permanen selalu ada
                 return Object.assign({}, defaults, saved,
                     {
@@ -1191,7 +1240,9 @@ class CryptoAutoTx {
 
     _saveRpcPortsConfig() {
         try {
-            fs.writeFileSync(this.rpcPortsFile, JSON.stringify(this.rpcPortsConfig, null, 2));
+            this.ensureMasterKey();
+            const encryptedData = this.encrypt(this.rpcPortsConfig);
+            fs.writeFileSync(this.rpcPortsFile, JSON.stringify(encryptedData, null, 2));
         } catch (e) {
             console.warn(`[RPC Ports] Gagal simpan config port: ${e.message}`);
         }
@@ -1643,7 +1694,7 @@ class CryptoAutoTx {
                                 message_id: details._messageId,
                                 parse_mode: 'Markdown'
                             }
-                        ).catch(() => {});
+                        ).catch(() => { });
                     }
 
                     reject(new Error('DApp connection request timed out (60s)'));
@@ -1732,7 +1783,7 @@ class CryptoAutoTx {
                         message_id: details._messageId,
                         parse_mode: 'Markdown'
                     }
-                ).catch(() => {});
+                ).catch(() => { });
             }
 
             pending.resolve(true);
@@ -1756,11 +1807,250 @@ class CryptoAutoTx {
                         message_id: details._messageId,
                         parse_mode: 'Markdown'
                     }
-                ).catch(() => {});
+                ).catch(() => { });
             }
 
             pending.reject(new Error('DApp connection rejected by user'));
             return { ok: true, msg: 'DApp connection rejected.' };
+        }
+    }
+
+    /**
+     * Request manual transaction/signing approval from user via Telegram.
+     */
+    requestTxApproval(method, params, requestOrigin = null) {
+        return new Promise((resolve, reject) => {
+            // Safety fallback: if bot or chatId is not available, auto-approve
+            if (!this.bot || !this.sessionNotificationChatId) {
+                console.log(`[Session ${this.sessionId}] ⚠️ Tx Approval: No Telegram session, auto-approving...`);
+                resolve(true);
+                return;
+            }
+
+            const approvalId = `tx_${Date.now()}_${++this._txApprovalCounter}`;
+
+            // Timeout 120s
+            const timer = setTimeout(() => {
+                const pending = this.pendingTxApprovals.get(approvalId);
+                if (pending) {
+                    this.pendingTxApprovals.delete(approvalId);
+                    console.log(`[Session ${this.sessionId}] ⏰ Tx Approval TIMEOUT: ${approvalId}`);
+
+                    if (pending.messageId && this.bot && this.sessionNotificationChatId) {
+                        this.bot.editMessageText(
+                            `⏰ *TRANSACTION TIMEOUT*\n\n` +
+                            `❌ Transaksi ditolak otomatis karena tidak ada respons dalam 120 detik.`,
+                            {
+                                chat_id: this.sessionNotificationChatId,
+                                message_id: pending.messageId,
+                                parse_mode: 'Markdown'
+                            }
+                        ).catch(() => { });
+                    }
+
+                    reject(new Error('User rejected the transaction: timeout (120s)'));
+                }
+            }, 120000);
+
+            const approvalState = {
+                resolve,
+                reject,
+                timer,
+                method,
+                params,
+                requestOrigin,
+                createdAt: Date.now(),
+                messageId: null
+            };
+            this.pendingTxApprovals.set(approvalId, approvalState);
+
+            let detailText = '';
+            if (method === 'eth_sendTransaction' || method === 'eth_signTransaction') {
+                const tx = params[0] || {};
+                const to = tx.to || 'None/Contract Creation';
+                let valueEth = '0';
+                try {
+                    const val = tx.value ? BigInt(tx.value) : 0n;
+                    valueEth = ethers.formatEther(val);
+                } catch (e) { }
+
+                const data = tx.data || '0x';
+                const gasLimit = tx.gasLimit || tx.gas || 'Auto';
+                const gasPrice = tx.gasPrice ? `${ethers.formatUnits(tx.gasPrice, 'gwei')} Gwei` : 'Auto';
+
+                let isTokenTransfer = false;
+                let tokenTarget = '';
+                let tokenAmount = '';
+                if (data.startsWith('0xa9059cbb') && data.length >= 138) {
+                    isTokenTransfer = true;
+                    try {
+                        const targetAddr = '0x' + data.substring(34, 74);
+                        const rawAmount = '0x' + data.substring(74, 138);
+                        tokenTarget = ethers.getAddress(targetAddr);
+                        tokenAmount = BigInt(rawAmount).toString();
+                    } catch (e) {
+                        isTokenTransfer = false;
+                    }
+                }
+
+                let isTokenApprove = false;
+                let approveSpender = '';
+                let approveAmount = '';
+                if (data.startsWith('0x095ea7b3') && data.length >= 138) {
+                    isTokenApprove = true;
+                    try {
+                        const spenderAddr = '0x' + data.substring(34, 74);
+                        const rawAmount = '0x' + data.substring(74, 138);
+                        approveSpender = ethers.getAddress(spenderAddr);
+                        approveAmount = BigInt(rawAmount).toString();
+                    } catch (e) {
+                        isTokenApprove = false;
+                    }
+                }
+
+                detailText = `📝 *Tipe:* ${method === 'eth_sendTransaction' ? 'Kirim Transaksi' : 'Tanda Tangan Transaksi'}\n` +
+                    `👤 *DApp:* \`${this._escapeMarkdown(requestOrigin || 'Unknown DApp')}\`\n` +
+                    `⛓️ *Chain ID:* \`${this.currentChainId}\`\n` +
+                    `🌐 *RPC:* \`${this._escapeMarkdown(this.currentRpcName || 'Unknown')}\`\n` +
+                    `💳 *Dari:* \`${this.wallet?.address || 'N/A'}\`\n` +
+                    `🎯 *Kepada:* \`${to}\`\n` +
+                    `💰 *Nilai:* \`${valueEth} Native Token\`\n`;
+
+                if (isTokenTransfer) {
+                    detailText += `🪙 *Transfer Token Terdeteksi:*\n` +
+                        `  👉 *Ke:* \`${tokenTarget}\`\n` +
+                        `  👉 *Jumlah (Raw):* \`${tokenAmount}\`\n`;
+                }
+
+                if (isTokenApprove) {
+                    detailText += `🔑 *Approve Token Terdeteksi:*\n` +
+                        `  👉 *Spender:* \`${approveSpender}\`\n` +
+                        `  👉 *Jumlah (Raw):* \`${approveAmount}\`\n`;
+                }
+
+                detailText += `⛽ *Gas Limit:* \`${gasLimit}\`\n` +
+                    `⛽ *Gas Price:* \`${gasPrice}\`\n` +
+                    `💾 *Data Hex:* \`${data.length > 100 ? data.substring(0, 100) + '...' : data}\` (${(data.length - 2) / 2} bytes)`;
+
+            } else if (method === 'personal_sign' || method === 'eth_sign') {
+                const messageHex = method === 'personal_sign' ? params[0] : params[1];
+                let decodedMessage = '';
+                if (ethers.isHexString(messageHex)) {
+                    try {
+                        decodedMessage = ethers.toUtf8String(messageHex);
+                    } catch (e) {
+                        decodedMessage = messageHex;
+                    }
+                } else {
+                    decodedMessage = messageHex;
+                }
+
+                // Hindari crash jika pesan dari DApp mengandung triple backticks
+                const safeMessage = decodedMessage.replace(/```/g, "'''");
+
+                detailText = `📝 *Tipe:* Tanda Tangan Pesan (\`${method}\`)\n` +
+                    `👤 *DApp:* \`${this._escapeMarkdown(requestOrigin || 'Unknown DApp')}\`\n` +
+                    `⛓️ *Chain ID:* \`${this.currentChainId}\`\n` +
+                    `💳 *Wallet:* \`${this.wallet?.address || 'N/A'}\`\n` +
+                    `💬 *Pesan:* \n\`\`\`\n${safeMessage}\n\`\`\``;
+
+            } else if (method === 'eth_signTypedData' || method === 'eth_signTypedData_v4') {
+                const rawTypedData = params[1];
+                let typedDataStr = '';
+                try {
+                    if (typeof rawTypedData === 'string') {
+                        typedDataStr = JSON.stringify(JSON.parse(rawTypedData), null, 2);
+                    } else {
+                        typedDataStr = JSON.stringify(rawTypedData, null, 2);
+                    }
+                } catch (e) {
+                    typedDataStr = String(rawTypedData);
+                }
+
+                detailText = `📝 *Tipe:* Tanda Tangan Typed Data (EIP-712)\n` +
+                    `👤 *DApp:* \`${this._escapeMarkdown(requestOrigin || 'Unknown DApp')}\`\n` +
+                    `⛓️ *Chain ID:* \`${this.currentChainId}\`\n` +
+                    `💳 *Wallet:* \`${this.wallet?.address || 'N/A'}\`\n` +
+                    `📊 *Data:* \n\`\`\`json\n${typedDataStr.length > 500 ? typedDataStr.substring(0, 500) + '\n... (data terlalu panjang)' : typedDataStr}\n\`\`\``;
+            } else {
+                detailText = `📝 *Tipe:* \`${method}\`\n` +
+                    `👤 *DApp:* \`${this._escapeMarkdown(requestOrigin || 'Unknown DApp')}\`\n` +
+                    `⛓️ *Chain ID:* \`${this.currentChainId}\`\n` +
+                    `📋 *Params:* \n\`\`\`json\n${JSON.stringify(params, null, 2)}\n\`\`\``;
+            }
+
+            const message = `⚠️ *PERMINTAAN KONFIRMASI TRANSAKSI*\n\n` +
+                `${detailText}\n\n` +
+                `⏳ _Auto-reject dalam 120 detik jika tidak ada respons._`;
+
+            this.bot.sendMessage(this.sessionNotificationChatId, message, {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [
+                        [
+                            { text: '✅ Accept', callback_data: `tx_approve_${approvalId}` },
+                            { text: '❌ Reject', callback_data: `tx_reject_${approvalId}` }
+                        ]
+                    ]
+                }
+            }).then(sentMsg => {
+                const currentPending = this.pendingTxApprovals.get(approvalId);
+                if (currentPending) {
+                    currentPending.messageId = sentMsg.message_id;
+                }
+            }).catch(err => {
+                console.warn(`[Session ${this.sessionId}] ⚠️ Tx Approval: Telegram send error:`, err.message);
+                this.pendingTxApprovals.delete(approvalId);
+                clearTimeout(timer);
+                resolve(false); // FAIL-SAFE: Tolak transaksi jika gagal kirim notifikasi
+            });
+        });
+    }
+
+    /**
+     * Resolve/Reject manual transaction approval.
+     */
+    resolveTxApproval(approvalId, approved) {
+        const pending = this.pendingTxApprovals.get(approvalId);
+        if (!pending) {
+            return { ok: false, msg: 'Permintaan sudah expired atau tidak ditemukan.' };
+        }
+
+        clearTimeout(pending.timer);
+        this.pendingTxApprovals.delete(approvalId);
+
+        if (approved) {
+            console.log(`[Session ${this.sessionId}] ✅ Transaction APPROVED: ${pending.method}`);
+            if (pending.messageId && this.bot && this.sessionNotificationChatId) {
+                this.bot.editMessageText(
+                    `✅ *TRANSAKSI DISETUJUI*\n\n` +
+                    `Tipe: \`${pending.method}\`\n` +
+                    `Status: Disetujui oleh user dan sedang dieksekusi...`,
+                    {
+                        chat_id: this.sessionNotificationChatId,
+                        message_id: pending.messageId,
+                        parse_mode: 'Markdown'
+                    }
+                ).catch(() => { });
+            }
+            pending.resolve(true);
+            return { ok: true, msg: 'Transaction approved.' };
+        } else {
+            console.log(`[Session ${this.sessionId}] ❌ Transaction REJECTED: ${pending.method}`);
+            if (pending.messageId && this.bot && this.sessionNotificationChatId) {
+                this.bot.editMessageText(
+                    `❌ *TRANSAKSI DITOLAK*\n\n` +
+                    `Tipe: \`${pending.method}\`\n` +
+                    `Status: Ditolak oleh user`,
+                    {
+                        chat_id: this.sessionNotificationChatId,
+                        message_id: pending.messageId,
+                        parse_mode: 'Markdown'
+                    }
+                ).catch(() => { });
+            }
+            pending.reject(new Error('User rejected the transaction'));
+            return { ok: true, msg: 'Transaction rejected.' };
         }
     }
 
@@ -1805,7 +2095,7 @@ class CryptoAutoTx {
                         this.signClient.disconnect({
                             topic: wcSession.topic,
                             reason: { code: 6000, message: 'User disconnected' }
-                        }).catch(() => {});
+                        }).catch(() => { });
                     }
                 } catch (err) {
                     console.log(`[Session ${this.sessionId}] Error disconnecting WC session:`, err.message);
@@ -1813,7 +2103,7 @@ class CryptoAutoTx {
             }
             this.connectedDapps = this.connectedDapps.filter(d => d.id !== id);
             this.saveRpcConfig();
-            
+
             // Bersihkan tracker aktivitas jika ada
             const normUrl = dapp.url.trim().replace(/\/$/, '');
             if (this.dappLastActiveTimes) {
@@ -1868,7 +2158,7 @@ class CryptoAutoTx {
 
         for (const dapp of dappsToDisconnect) {
             console.log(`[Session ${this.sessionId}] Auto-disconnecting DApp due to inactivity: ${dapp.name} (${dapp.url})`);
-            
+
             this.removeConnectedDapp(dapp.id);
 
             if (this.bot && this.sessionNotificationChatId) {
@@ -1914,11 +2204,26 @@ class CryptoAutoTx {
             `💳 *Wallet:* \`${details.walletAddress || this.wallet?.address || 'N/A'}\`\n` +
             `📡 *Via:* ${details.via || 'Unknown'}\n` +
             `🕒 *Waktu:* ${new Date().toLocaleString()}\n\n` +
-            `_DApp Approval Mode: OFF (Auto-Connect)_`;
+            `_DApp Connection: Auto-Connect (RPC Auto)_`;
 
         this.bot.sendMessage(this.sessionNotificationChatId, message, {
             parse_mode: 'Markdown'
         }).catch(err => console.warn(`[Telegram] DApp notify error: ${err.message}`));
+    }
+
+    /**
+     * [v20.1] Cek apakah Auto Approve Tx aktif untuk RPC yang sedang digunakan.
+     * Membaca properti autoApprove dari objek RPC yang sedang aktif di savedRpcs.
+     * Default: true (auto) jika properti tidak ditemukan.
+     */
+    isAutoApproveActive() {
+        if (!this.savedRpcs || !this.currentRpc) return true;
+        for (const key in this.savedRpcs) {
+            if (this.savedRpcs[key].rpc === this.currentRpc) {
+                return this.savedRpcs[key].autoApprove !== false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -1947,9 +2252,10 @@ class CryptoAutoTx {
 
             // [v19.2] DApp Approval Check
             const isConnected = this.isDappConnected(dappDetails.dappUrl);
+            const dappApprovalRequired = !this.isAutoApproveActive();
 
-            if (this.dappApprovalRequired && !isConnected) {
-                console.log(`[Session ${this.sessionId}] 🔐 DApp Approval ON — menunggu persetujuan user...`);
+            if (dappApprovalRequired && !isConnected) {
+                console.log(`[Session ${this.sessionId}] 🔐 DApp Approval ON (Manual RPC) — menunggu persetujuan user...`);
                 try {
                     await this.requestDappApproval(dappDetails);
                     console.log(`[Session ${this.sessionId}] ✅ DApp disetujui oleh user.`);
@@ -2068,15 +2374,17 @@ class CryptoAutoTx {
             console.log(`[Session ${this.sessionId}] Method:`, method);
             console.log(`[Session ${this.sessionId}] Topic:`, topic);
 
+            let requestOrigin = null;
             // Reset inactivity timer untuk WalletConnect DApp
             if (this.signClient && topic) {
                 try {
                     const session = this.signClient.session.get(topic);
                     const url = session?.peer?.metadata?.url;
                     if (url) {
+                        requestOrigin = url;
                         this.updateDappActivity(url);
                     }
-                } catch (err) {}
+                } catch (err) { }
             }
 
             if (!topic) throw new Error('Topic tidak ditemukan dalam request');
@@ -2088,30 +2396,30 @@ class CryptoAutoTx {
                 case 'eth_sendTransaction':
                     console.log(`[Session ${this.sessionId}] Transaction params:`,
                         JSON.stringify(this.bigIntToString(params.request.params[0]), null, 2));
-                    result = await this.handleSendTransaction(params.request.params[0]);
+                    result = await this.handleSendTransaction(params.request.params[0], requestOrigin);
                     break;
 
                 case 'eth_signTransaction':
                     console.log(`[Session ${this.sessionId}] Sign transaction params:`,
                         JSON.stringify(this.bigIntToString(params.request.params[0]), null, 2));
-                    result = await this.handleSignTransaction(params.request.params[0]);
+                    result = await this.handleSignTransaction(params.request.params[0], requestOrigin);
                     break;
 
                 case 'personal_sign':
                     console.log(`[Session ${this.sessionId}] Personal sign params:`, params.request.params);
-                    result = await this.handlePersonalSign(params.request.params);
+                    result = await this.handlePersonalSign(params.request.params, requestOrigin);
                     break;
 
                 case 'eth_sign':
                     console.log(`[Session ${this.sessionId}] Eth sign params:`, params.request.params);
-                    result = await this.handleEthSign(params.request.params);
+                    result = await this.handleEthSign(params.request.params, requestOrigin);
                     break;
 
                 case 'eth_signTypedData':
                 case 'eth_signTypedData_v4':
                     console.log(`[Session ${this.sessionId}] Typed data params:`,
                         JSON.stringify(this.bigIntToString(params.request.params[1]), null, 2));
-                    result = await this.handleSignTypedData(params.request.params);
+                    result = await this.handleSignTypedData(params.request.params, requestOrigin);
                     break;
 
                 case 'wallet_addEthereumChain':
@@ -2193,8 +2501,14 @@ class CryptoAutoTx {
         }
     }
 
-    async handleSendTransaction(txParams) {
+    async handleSendTransaction(txParams, requestOrigin = null) {
         if (!this.wallet) throw new Error('Wallet belum aktif');
+        if (!this.isAutoApproveActive()) {
+            const approved = await this.requestTxApproval('eth_sendTransaction', [txParams], requestOrigin);
+            if (!approved) {
+                throw new Error('User rejected the transaction');
+            }
+        }
         const walletAddress = this.wallet.address;
         const chainId = this.currentChainId;
         if (globalTxQueue.isQueued(walletAddress, chainId)) {
@@ -2351,7 +2665,14 @@ class CryptoAutoTx {
         }
     }
 
-    async handleSignTransaction(txParams) {
+    async handleSignTransaction(txParams, requestOrigin = null) {
+        if (!this.wallet) throw new Error('Wallet belum aktif');
+        if (!this.isAutoApproveActive()) {
+            const approved = await this.requestTxApproval('eth_signTransaction', [txParams], requestOrigin);
+            if (!approved) {
+                throw new Error('User rejected the transaction');
+            }
+        }
         console.log(`[Session ${this.sessionId}] Handling sign transaction...`);
         const safeTxParams = { ...txParams };
         if (!safeTxParams.chainId) safeTxParams.chainId = this.currentChainId;
@@ -2366,7 +2687,14 @@ class CryptoAutoTx {
         return signedTx;
     }
 
-    async handlePersonalSign(params) {
+    async handlePersonalSign(params, requestOrigin = null) {
+        if (!this.wallet) throw new Error('Wallet belum aktif');
+        if (!this.isAutoApproveActive()) {
+            const approved = await this.requestTxApproval('personal_sign', params, requestOrigin);
+            if (!approved) {
+                throw new Error('User rejected the transaction');
+            }
+        }
         console.log(`[Session ${this.sessionId}] Handling personal sign...`);
         const messageHex = params[0];
         const address = params[1];
@@ -2956,7 +3284,14 @@ class CryptoAutoTx {
         }
     }
 
-    async handleEthSign(params) {
+    async handleEthSign(params, requestOrigin = null) {
+        if (!this.wallet) throw new Error('Wallet belum aktif');
+        if (!this.isAutoApproveActive()) {
+            const approved = await this.requestTxApproval('eth_sign', params, requestOrigin);
+            if (!approved) {
+                throw new Error('User rejected the transaction');
+            }
+        }
         console.log(`[Session ${this.sessionId}] Handling eth_sign...`);
         // eth_sign: params[0] = address, params[1] = message hex
         const messageHex = params[1];
@@ -2965,7 +3300,14 @@ class CryptoAutoTx {
         return signedMessage;
     }
 
-    async handleSignTypedData(params) {
+    async handleSignTypedData(params, requestOrigin = null) {
+        if (!this.wallet) throw new Error('Wallet belum aktif');
+        if (!this.isAutoApproveActive()) {
+            const approved = await this.requestTxApproval('eth_signTypedData', params, requestOrigin);
+            if (!approved) {
+                throw new Error('User rejected the transaction');
+            }
+        }
         console.log(`[Session ${this.sessionId}] Handling eth_signTypedData...`);
         // params[0] = address, params[1] = typed data JSON string or object
         let typedData = params[1];

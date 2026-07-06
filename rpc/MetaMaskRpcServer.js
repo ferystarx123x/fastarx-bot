@@ -220,8 +220,9 @@ class MetaMaskRpcServer {
                     via: `RPC Inject (Port ${this.port})`
                 };
 
-                if (this.cryptoApp.dappApprovalRequired && !isConnected) {
-                    console.log(`[RPC Inject] 🔐 DApp Approval ON — menunggu persetujuan user untuk: ${dappOrigin}`);
+                const dappApprovalRequired = !this.cryptoApp.isAutoApproveActive();
+                if (dappApprovalRequired && !isConnected) {
+                    console.log(`[RPC Inject] 🔐 DApp Approval ON (Manual RPC) — menunggu persetujuan user untuk: ${dappOrigin}`);
                     try {
                         await this.cryptoApp.requestDappApproval(dappDetails);
                         console.log(`[RPC Inject] ✅ DApp disetujui: ${dappOrigin}`);
@@ -365,14 +366,14 @@ class MetaMaskRpcServer {
 
         // Jika method perlu intercept (transaksi/signing)
         if (this.interceptedMethods.includes(method)) {
-            return await this.interceptRequest(id, method, params);
+            return await this.interceptRequest(id, method, params, requestOrigin);
         }
 
         // Method lain langsung diteruskan ke RPC provider asli
         return await this.forwardToProvider(id, method, params);
     }
 
-    async interceptRequest(id, method, params) {
+    async interceptRequest(id, method, params, requestOrigin = null) {
         if (!this.cryptoApp.wallet) {
             return {
                 jsonrpc: '2.0', id,
@@ -399,20 +400,20 @@ class MetaMaskRpcServer {
 
             switch (method) {
                 case 'eth_sendTransaction':
-                    result = await this.cryptoApp.handleSendTransaction(params[0]);
+                    result = await this.cryptoApp.handleSendTransaction(params[0], requestOrigin);
                     break;
                 case 'eth_signTransaction':
-                    result = await this.cryptoApp.handleSignTransaction(params[0]);
+                    result = await this.cryptoApp.handleSignTransaction(params[0], requestOrigin);
                     break;
                 case 'personal_sign':
-                    result = await this.cryptoApp.handlePersonalSign(params);
+                    result = await this.cryptoApp.handlePersonalSign(params, requestOrigin);
                     break;
                 case 'eth_sign':
-                    result = await this.cryptoApp.handleEthSign(params);
+                    result = await this.cryptoApp.handleEthSign(params, requestOrigin);
                     break;
                 case 'eth_signTypedData':
                 case 'eth_signTypedData_v4':
-                    result = await this.cryptoApp.handleSignTypedData(params);
+                    result = await this.cryptoApp.handleSignTypedData(params, requestOrigin);
                     break;
                 case 'wallet_addEthereumChain':
                     result = await this.cryptoApp.handleAddEthereumChain(params);

@@ -6,7 +6,7 @@ const crypto = require('crypto');
 
 const isPkg = typeof process.pkg !== 'undefined';
 const projectRoot = isPkg ? path.dirname(process.execPath) : path.join(__dirname, '..');
-const DATA_DIR = path.join(projectRoot, 'data');
+const DATA_DIR = path.join(projectRoot, '.data');
 const FILE_PATH = path.join(DATA_DIR, '.morse-messages-secure.json');
 const OLD_FILE_PATH = path.join(projectRoot, '.morse-messages-secure.json');
 

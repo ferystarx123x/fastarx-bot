@@ -4,35 +4,46 @@ const crypto = require('crypto');
 const integrityGuard = require('../core/integrityGuard');
 
 class EnvDecryptor {
-    constructor() {
-        this.configKey = this.generateConfigKey();
-    }
-
-    generateConfigKey() {
-        const liveHash = integrityGuard.calculateProjectHash();
-        return crypto.pbkdf2Sync(
-            'FASTARX_CONFIG_KEY_2024' + liveHash,
-            'CONFIG_SALT_2024',
-            50000,
-            32,
-            'sha256'
-        );
-    }
-
     decryptValue(encryptedValue) {
         if (!encryptedValue) return null;
+        const parts = encryptedValue.split(':');
+        if (parts.length !== 2) return null;
+
+        const encryptedData = parts[0];
+        const iv = Buffer.from(parts[1], 'hex');
+
+        // Coba 1: Menggunakan liveHash
         try {
-            const key = this.configKey;
-            const parts = encryptedValue.split(':');
-            if (parts.length !== 2) {
-                throw new Error('Format nilai terenkripsi tidak valid.');
-            }
-            
-            const encryptedData = parts[0];
-            const iv = Buffer.from(parts[1], 'hex');
-            
+            const liveHash = integrityGuard.calculateProjectHash();
+            const key = crypto.pbkdf2Sync(
+                'FASTARX_CONFIG_KEY_2024' + liveHash,
+                'CONFIG_SALT_2024',
+                50000, 32, 'sha256'
+            );
             const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
-            
+            let decrypted = decipher.update(encryptedData, 'base64', 'utf8');
+            decrypted += decipher.final('utf8');
+            return decrypted;
+        } catch (e) {}
+
+        // Coba 2: Menggunakan approvedHash
+        try {
+            const approvedHash = integrityGuard.getApprovedHash() || '';
+            const key = crypto.pbkdf2Sync(
+                'FASTARX_CONFIG_KEY_2024' + approvedHash,
+                'CONFIG_SALT_2024',
+                50000, 32, 'sha256'
+            );
+            const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+            let decrypted = decipher.update(encryptedData, 'base64', 'utf8');
+            decrypted += decipher.final('utf8');
+            return decrypted;
+        } catch (e) {}
+
+        // Coba 3: Menggunakan static key
+        try {
+            const staticKey = crypto.pbkdf2Sync('FASTARX_CONFIG_KEY_2024', 'CONFIG_SALT_2024', 50000, 32, 'sha256');
+            const decipher = crypto.createDecipheriv('aes-256-cbc', staticKey, iv);
             let decrypted = decipher.update(encryptedData, 'base64', 'utf8');
             decrypted += decipher.final('utf8');
             return decrypted;

@@ -125,17 +125,17 @@ class TelegramFullController {
     // ─── UPDATE PASSWORD DI .env (OWNER ONLY) ────────────────────────────────
     _updatePasswordInEnv(type, newPassword) {
         try {
-            const envPath = path.join(projectRoot, 'security', '.env');
+            const envPath = path.join(projectRoot, '.security', '.env');
             if (!fs.existsSync(envPath)) {
                 return { ok: false, msg: 'File .env tidak ditemukan di folder security/.' };
             }
             
-            // Menggunakan hash live aktif proyek agar enkripsi sinkron dengan loadConfiguration
+            // Menggunakan approvedHash agar enkripsi sinkron dengan loadConfiguration & tetap stabil
             const integrityGuard = require('../core/integrityGuard');
-            const liveHash = integrityGuard.calculateProjectHash();
+            const hash = integrityGuard.getApprovedHash() || integrityGuard.calculateProjectHash();
             
             const configKey = crypto.pbkdf2Sync(
-                'FASTARX_CONFIG_KEY_2024' + liveHash,
+                'FASTARX_CONFIG_KEY_2024' + hash,
                 'CONFIG_SALT_2024',
                 50000,
                 32,
@@ -168,6 +168,174 @@ class TelegramFullController {
         } catch (e) {
             return { ok: false, msg: e.message };
         }
+    }
+
+    // ─── BACA SETUP 2FA SECRET DARI .env (sama seperti control.js) ────────────
+    _readSetup2FASecretFromEnv() {
+        try {
+            const envPath = path.join(projectRoot, '.security', '.env');
+            if (!fs.existsSync(envPath)) return null;
+
+            const envContent = fs.readFileSync(envPath, 'utf8');
+            const match = envContent.match(/^SETUP_2FA_SECRET_ENCRYPTED\s*=\s*["']?([^"'\r\n]+)["']?/m);
+            if (!match) return null;
+
+            const encryptedValue = match[1];
+            const parts = encryptedValue.split(':');
+            if (parts.length !== 2) return null;
+
+            const integrityGuard = require('../core/integrityGuard');
+
+            // Coba 3 metode dekripsi (sama seperti pola di control.js):
+            // 1) Live hash (calculateProjectHash)
+            // 2) Approved hash (dari .integrity.lock)
+            // 3) Static key (tanpa hash — kompatibel setup.js)
+            const hashCandidates = [
+                integrityGuard.calculateProjectHash(),
+                integrityGuard.getApprovedHash() || '',
+                '' // static key fallback
+            ];
+
+            // Deduplikasi agar tidak coba hash yang sama 2x
+            const tried = new Set();
+            for (const hash of hashCandidates) {
+                if (tried.has(hash)) continue;
+                tried.add(hash);
+                try {
+                    const configKey = crypto.pbkdf2Sync(
+                        'FASTARX_CONFIG_KEY_2024' + hash,
+                        'CONFIG_SALT_2024',
+                        50000, 32, 'sha256'
+                    );
+                    const iv = Buffer.from(parts[1], 'hex');
+                    const decipher = crypto.createDecipheriv('aes-256-cbc', configKey, iv);
+                    let decrypted = decipher.update(parts[0], 'base64', 'utf8');
+                    decrypted += decipher.final('utf8');
+                    return decrypted; // Berhasil!
+                } catch (e) {
+                    // Gagal dengan hash ini — coba berikutnya
+                }
+            }
+
+            return null; // Semua metode gagal
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // ─── VERIFIKASI TOTP (RFC 6238, sama persis dengan control.js) ────────────
+    _verifySetup2FATOTP(secret, token) {
+        try {
+            const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+            let bits = 0, value = 0;
+            const output = [];
+            const input = secret.replace(/=+$/, '').toUpperCase();
+            for (const char of input) {
+                const idx = alphabet.indexOf(char);
+                if (idx === -1) continue;
+                value = (value << 5) | idx;
+                bits += 5;
+                if (bits >= 8) { output.push((value >>> (bits - 8)) & 0xff); bits -= 8; }
+            }
+            const key = Buffer.from(output);
+
+            const counter = Math.floor(Date.now() / 1000 / 30);
+            for (let delta = -1; delta <= 1; delta++) {
+                const c = counter + delta;
+                const buf = Buffer.alloc(8);
+                let tmp = c;
+                for (let i = 7; i >= 0; i--) { buf[i] = tmp & 0xff; tmp = Math.floor(tmp / 256); }
+                const hmac = crypto.createHmac('sha1', key).update(buf).digest();
+                const offset = hmac[hmac.length - 1] & 0x0f;
+                const code = (
+                    ((hmac[offset] & 0x7f) << 24) | (hmac[offset + 1] << 16) |
+                    (hmac[offset + 2] << 8) | hmac[offset + 3]
+                ) % 1000000;
+                if (code.toString().padStart(6, '0') === token.toString()) return true;
+            }
+        } catch (e) {}
+        return false;
+    }
+
+    // ─── KIRIM NOTIFIKASI KE CONTROLLER BOT VIA HTTP ─────────────────────────
+    _notifyControllerBot(endpoint, data = {}) {
+        return new Promise((resolve) => {
+            const port = process.env.CONTROLLER_HTTP_PORT || 3099;
+            const body = JSON.stringify(data);
+            const req = http.request({
+                hostname: '127.0.0.1',
+                port,
+                path: endpoint,
+                method: 'POST',
+                timeout: 5000,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Content-Length': Buffer.byteLength(body)
+                }
+            }, (res) => {
+                let responseData = '';
+                res.on('data', chunk => responseData += chunk);
+                res.on('end', () => {
+                    try { resolve(JSON.parse(responseData)); }
+                    catch (e) { resolve({ ok: false }); }
+                });
+            });
+            req.on('error', () => resolve({ ok: false, reason: 'controller_offline' }));
+            req.on('timeout', () => { req.destroy(); resolve({ ok: false, reason: 'timeout' }); });
+            req.write(body);
+            req.end();
+        });
+    }
+
+    // ─── SCHEDULE AUTO-RESTART SETELAH GANTI PASSWORD (mirip control.js) ─────
+    _scheduleMainBotRestart(chatId, reason = 'password_changed') {
+        // Batalkan timer restart sebelumnya jika ada
+        if (this._restartTimer) {
+            clearTimeout(this._restartTimer);
+        }
+
+        // Kirim notifikasi ke Controller Bot
+        this._notifyControllerBot('/notify-restart', {
+            reason,
+            chatId: String(chatId),
+            timestamp: new Date().toISOString()
+        }).catch(() => {});
+
+        // Kirim notifikasi ke user di bot utama
+        this.bot.sendMessage(chatId,
+            `🔄 *RESTART OTOMATIS*\n\n` +
+            `Password berhasil diubah. File konfigurasi (\`.env\`) telah diperbarui.\n\n` +
+            `⏱️ Bot akan *restart otomatis dalam 60 detik* untuk menerapkan perubahan.\n\n` +
+            `⚠️ _Semua sesi DApp dan RPC akan di-reset. Silakan login ulang setelah bot aktif kembali._`,
+            { parse_mode: 'Markdown' }
+        ).catch(() => {});
+
+        this._restartTimer = setTimeout(async () => {
+            // Kirim notifikasi final
+            this.bot.sendMessage(chatId,
+                `🔄 *Restarting...* Memulai ulang Bot Utama sekarang.`,
+                { parse_mode: 'Markdown' }
+            ).catch(() => {});
+
+            // Tunggu sebentar agar pesan terkirim
+            await new Promise(r => setTimeout(r, 1000));
+
+            console.log('🔄 [Password Changed] Melakukan restart otomatis...');
+
+            // Cleanup semua sesi
+            await this.cleanup();
+
+            // Kirim sinyal restart ke Controller
+            try {
+                await this._notifyControllerBot('/request-restart', {
+                    chatId: String(chatId)
+                });
+            } catch (err) {
+                console.error('⚠️ Gagal mengirim sinyal restart ke Controller:', err.message);
+            }
+
+            process.exit(0);
+        }, 60000); // 60 detik
     }
 
     initBot() {
@@ -371,7 +539,7 @@ class TelegramFullController {
     _get2FA(chatId) {
         if (!this._twoFAMap) this._twoFAMap = new Map();
         if (!this._twoFAMap.has(chatId)) {
-            const dataDir = path.join(projectRoot, 'data', `user_${chatId}`);
+            const dataDir = path.join(projectRoot, '.data', `user_${chatId}`);
             this._twoFAMap.set(chatId, new TwoFactorAuth(dataDir));
         }
         return this._twoFAMap.get(chatId);
@@ -386,7 +554,7 @@ class TelegramFullController {
     _getBackupGuard(chatId) {
         if (!this._backupGuardMap) this._backupGuardMap = new Map();
         if (!this._backupGuardMap.has(chatId)) {
-            const dataDir = path.join(projectRoot, 'data', `user_${chatId}`);
+            const dataDir = path.join(projectRoot, '.data', `user_${chatId}`);
             this._backupGuardMap.set(chatId, new BackupPasswordGuard(dataDir));
         }
         return this._backupGuardMap.get(chatId);
@@ -728,10 +896,10 @@ class TelegramFullController {
             return;
         }
 
-        const dappApprovalOn = cryptoApp.dappApprovalRequired || false;
-        const dappApprovalLabel = dappApprovalOn
-            ? '🔐 DApp Approval: 🟢 ON (klik untuk OFF)'
-            : '🔐 DApp Approval: 🔴 OFF (klik untuk ON)';
+        const activeRpcAuto = cryptoApp.isAutoApproveActive();
+        const connectionApprovalLabel = `🔐 DApp Connection: ${activeRpcAuto ? '🔴 Auto-Connect' : '🟢 Manual Approval'}`;
+
+        const autoApproveLabel = '⚡ Auto Approve Tx: ⚙️ Kelola per RPC';
 
         const timeout = cryptoApp.dappInactivityTimeout !== undefined ? cryptoApp.dappInactivityTimeout : 30;
         const timerLabel = timeout === 0
@@ -739,7 +907,8 @@ class TelegramFullController {
             : `⏱️ Auto-Disconnect: 🟢 ${timeout} Menit (klik untuk ubah)`;
 
         const keyboard = [
-            [{ text: dappApprovalLabel, callback_data: 'dapp_approval_toggle_new' }],
+            [{ text: connectionApprovalLabel, callback_data: 'dapp_connection_info_alert' }],
+            [{ text: autoApproveLabel, callback_data: 'auto_approve_menu' }],
             [{ text: timerLabel, callback_data: 'dapp_timer_settings' }]
         ];
 
@@ -770,17 +939,64 @@ class TelegramFullController {
 
         keyboard.push([{ text: '🔙 Kembali', callback_data: 'menu_lainnya' }]);
 
-        const dappStatusInfo = dappApprovalOn
-            ? '🟢 *DApp Approval:* ON — Setiap koneksi DApp baru memerlukan persetujuan manual via Telegram.'
-            : '🔴 *DApp Approval:* OFF — DApp baru otomatis terhubung (auto-connect).';
+        const activeRpcName = cryptoApp.currentRpcName || 'Unknown';
+        const dappStatusInfo = `🔌 *DApp Connection:* ${activeRpcAuto ? '🔴 Auto-Connect' : '🟢 Manual Approval'} (Mengikuti RPC aktif: *${escapeMarkdown(activeRpcName)}*)`;
+
+        let manualCount = 0;
+        let autoCount = 0;
+        const rpcList = Object.values(cryptoApp.savedRpcs || {});
+        rpcList.forEach(rpc => {
+            if (rpc.autoApprove === false) manualCount++;
+            else autoCount++;
+        });
+
+        const txStatusInfo = `⚡ *Auto Approve Tx:* ${autoCount} Auto / ${manualCount} Manual — Rincian per RPC.`;
 
         this.bot.sendMessage(chatId,
             `🌐 *KELOLA DAPPS*\n\n` +
-            `${dappStatusInfo}\n\n` +
+            `${dappStatusInfo}\n` +
+            `${txStatusInfo}\n\n` +
             `${dappsListText}` +
             `Pilih aksi di bawah:`,
             { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } }
         );
+    }
+
+    async showAutoApproveTxMenu(chatId) {
+        const cryptoApp = this.userSessions.get(chatId);
+        if (!cryptoApp) {
+            this.bot.sendMessage(chatId, '❌ Sesi tidak ditemukan. Silakan /start ulang.');
+            return;
+        }
+
+        const rpcList = Object.entries(cryptoApp.savedRpcs || {});
+        if (rpcList.length === 0) {
+            const keyboard = [[{ text: '🔙 Kembali', callback_data: 'dapps_menu' }]];
+            this.bot.sendMessage(chatId, '📭 Tidak ada RPC tersimpan di RPC Management. Silakan tambah RPC terlebih dahulu.', {
+                reply_markup: { inline_keyboard: keyboard }
+            });
+            return;
+        }
+
+        let message = '⚡ *KELOLA AUTO APPROVE TX PER RPC*\n\n' +
+                      'Klik tombol di bawah untuk mengubah status Auto Approve masing-masing RPC:\n' +
+                      '🟢 *Auto* — Transaksi otomatis dieksekusi.\n' +
+                      '🔴 *Manual* — Transaksi memerlukan konfirmasi (Accept/Reject).\n\n';
+
+        const keyboard = [];
+        rpcList.forEach(([key, rpc]) => {
+            const isAuto = rpc.autoApprove !== false;
+            const statusLabel = isAuto ? '🟢 Auto' : '🔴 Manual';
+            const buttonText = `${rpc.name} (${statusLabel})`;
+            keyboard.push([{ text: buttonText, callback_data: `auto_approve_rpc_${key}` }]);
+        });
+
+        keyboard.push([{ text: '🔙 Kembali', callback_data: 'dapps_menu' }]);
+
+        this.bot.sendMessage(chatId, message, {
+            parse_mode: 'Markdown',
+            reply_markup: { inline_keyboard: keyboard }
+        });
     }
 
     async processDappTimerInput(cryptoApp, chatId, text, msg) {
@@ -1078,7 +1294,7 @@ class TelegramFullController {
     // ===================================
 
     getExplorerApiKeys(chatId) {
-        const filePath = path.join(projectRoot, `data/${chatId}_explorer_keys.enc`);
+        const filePath = path.join(projectRoot, `.data/${chatId}_explorer_keys.enc`);
         if (!fs.existsSync(filePath)) {
             return {};
         }
@@ -1093,7 +1309,7 @@ class TelegramFullController {
     }
 
     saveExplorerApiKeys(chatId, keys) {
-        const dir = path.join(projectRoot, 'data');
+        const dir = path.join(projectRoot, '.data');
         if (!fs.existsSync(dir)) {
             fs.mkdirSync(dir, { recursive: true });
         }
@@ -1110,22 +1326,39 @@ class TelegramFullController {
     }
 
     getTrackedWallets(chatId) {
-        const filePath = path.join(projectRoot, `data/${chatId}_tracked_wallets.json`);
-        if (!fs.existsSync(filePath)) return [];
-        try {
-            return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-        } catch (e) {
-            console.error('Failed to read tracked wallets:', e);
-            return [];
+        const encPath = path.join(projectRoot, `.data/${chatId}_tracked_wallets.enc`);
+        const jsonPath = path.join(projectRoot, `.data/${chatId}_tracked_wallets.json`);
+        
+        if (fs.existsSync(encPath)) {
+            try {
+                const raw = fs.readFileSync(encPath, 'utf8');
+                const decrypted = this._decryptData(raw, this.config.SCRIPT_PASSWORD + chatId);
+                return JSON.parse(decrypted);
+            } catch (e) {
+                console.error('Failed to decrypt tracked wallets:', e);
+            }
         }
+        if (fs.existsSync(jsonPath)) {
+            try {
+                const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+                this.saveTrackedWallets(chatId, data);
+                try { fs.unlinkSync(jsonPath); } catch (_) {}
+                return data;
+            } catch (e) {
+                console.error('Failed to read tracked wallets json:', e);
+            }
+        }
+        return [];
     }
 
     saveTrackedWallets(chatId, wallets) {
-        const dir = path.join(projectRoot, 'data');
+        const dir = path.join(projectRoot, '.data');
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-        const filePath = path.join(dir, `${chatId}_tracked_wallets.json`);
+        const filePath = path.join(dir, `${chatId}_tracked_wallets.enc`);
         try {
-            fs.writeFileSync(filePath, JSON.stringify(wallets, null, 2), 'utf8');
+            const encrypted = this._encryptData(JSON.stringify(wallets), this.config.SCRIPT_PASSWORD + chatId);
+            fs.writeFileSync(filePath, encrypted, 'utf8');
+            try { fs.chmodSync(filePath, 0o600); } catch (_) {}
             return true;
         } catch (e) {
             console.error('Failed to save tracked wallets:', e);
@@ -1134,22 +1367,39 @@ class TelegramFullController {
     }
 
     getTrackerHistory(chatId) {
-        const filePath = path.join(projectRoot, `data/${chatId}_tracker_history.json`);
-        if (!fs.existsSync(filePath)) return [];
-        try {
-            return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-        } catch (e) {
-            console.error('Failed to read tracker history:', e);
-            return [];
+        const encPath = path.join(projectRoot, `.data/${chatId}_tracker_history.enc`);
+        const jsonPath = path.join(projectRoot, `.data/${chatId}_tracker_history.json`);
+        
+        if (fs.existsSync(encPath)) {
+            try {
+                const raw = fs.readFileSync(encPath, 'utf8');
+                const decrypted = this._decryptData(raw, this.config.SCRIPT_PASSWORD + chatId);
+                return JSON.parse(decrypted);
+            } catch (e) {
+                console.error('Failed to decrypt tracker history:', e);
+            }
         }
+        if (fs.existsSync(jsonPath)) {
+            try {
+                const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+                this.saveTrackerHistory(chatId, data);
+                try { fs.unlinkSync(jsonPath); } catch (_) {}
+                return data;
+            } catch (e) {
+                console.error('Failed to read tracker history json:', e);
+            }
+        }
+        return [];
     }
 
     saveTrackerHistory(chatId, history) {
-        const dir = path.join(projectRoot, 'data');
+        const dir = path.join(projectRoot, '.data');
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-        const filePath = path.join(dir, `${chatId}_tracker_history.json`);
+        const filePath = path.join(dir, `${chatId}_tracker_history.enc`);
         try {
-            fs.writeFileSync(filePath, JSON.stringify(history, null, 2), 'utf8');
+            const encrypted = this._encryptData(JSON.stringify(history), this.config.SCRIPT_PASSWORD + chatId);
+            fs.writeFileSync(filePath, encrypted, 'utf8');
+            try { fs.chmodSync(filePath, 0o600); } catch (_) {}
             return true;
         } catch (e) {
             console.error('Failed to save tracker history:', e);
@@ -1158,22 +1408,40 @@ class TelegramFullController {
     }
 
     getTrackerState(chatId) {
-        const filePath = path.join(projectRoot, `data/${chatId}_tracker_state.json`);
-        if (!fs.existsSync(filePath)) return { active: false, lastScannedBlocks: {}, scannedTxHashes: [] };
-        try {
-            return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-        } catch (e) {
-            console.error('Failed to read tracker state:', e);
-            return { active: false, lastScannedBlocks: {}, scannedTxHashes: [] };
+        const encPath = path.join(projectRoot, `.data/${chatId}_tracker_state.enc`);
+        const jsonPath = path.join(projectRoot, `.data/${chatId}_tracker_state.json`);
+        const defaultState = { active: false, lastScannedBlocks: {}, scannedTxHashes: [] };
+        
+        if (fs.existsSync(encPath)) {
+            try {
+                const raw = fs.readFileSync(encPath, 'utf8');
+                const decrypted = this._decryptData(raw, this.config.SCRIPT_PASSWORD + chatId);
+                return JSON.parse(decrypted);
+            } catch (e) {
+                console.error('Failed to decrypt tracker state:', e);
+            }
         }
+        if (fs.existsSync(jsonPath)) {
+            try {
+                const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+                this.saveTrackerState(chatId, data);
+                try { fs.unlinkSync(jsonPath); } catch (_) {}
+                return data;
+            } catch (e) {
+                console.error('Failed to read tracker state json:', e);
+            }
+        }
+        return defaultState;
     }
 
     saveTrackerState(chatId, state) {
-        const dir = path.join(projectRoot, 'data');
+        const dir = path.join(projectRoot, '.data');
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-        const filePath = path.join(dir, `${chatId}_tracker_state.json`);
+        const filePath = path.join(dir, `${chatId}_tracker_state.enc`);
         try {
-            fs.writeFileSync(filePath, JSON.stringify(state, null, 2), 'utf8');
+            const encrypted = this._encryptData(JSON.stringify(state), this.config.SCRIPT_PASSWORD + chatId);
+            fs.writeFileSync(filePath, encrypted, 'utf8');
+            try { fs.chmodSync(filePath, 0o600); } catch (_) {}
             return true;
         } catch (e) {
             console.error('Failed to save tracker state:', e);
@@ -1226,10 +1494,24 @@ class TelegramFullController {
     }
 
     getManualRpcs(chatId) {
-        const filePath = path.join(projectRoot, `data/${chatId}_manual_rpcs.json`);
-        if (fs.existsSync(filePath)) {
+        const encPath = path.join(projectRoot, `.data/${chatId}_manual_rpcs.enc`);
+        const jsonPath = path.join(projectRoot, `.data/${chatId}_manual_rpcs.json`);
+        
+        if (fs.existsSync(encPath)) {
             try {
-                return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+                const raw = fs.readFileSync(encPath, 'utf8');
+                const decrypted = this._decryptData(raw, this.config.SCRIPT_PASSWORD + chatId);
+                return JSON.parse(decrypted);
+            } catch (e) {
+                return {};
+            }
+        }
+        if (fs.existsSync(jsonPath)) {
+            try {
+                const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+                this.saveManualRpcs(chatId, data);
+                try { fs.unlinkSync(jsonPath); } catch (_) {}
+                return data;
             } catch (e) {
                 return {};
             }
@@ -1238,46 +1520,84 @@ class TelegramFullController {
     }
 
     saveManualRpcs(chatId, rpcs) {
-        const dir = path.join(projectRoot, 'data');
+        const dir = path.join(projectRoot, '.data');
         if (!fs.existsSync(dir)) {
             fs.mkdirSync(dir, { recursive: true });
         }
-        const filePath = path.join(dir, `${chatId}_manual_rpcs.json`);
-        fs.writeFileSync(filePath, JSON.stringify(rpcs, null, 2), 'utf8');
+        const filePath = path.join(dir, `${chatId}_manual_rpcs.enc`);
+        try {
+            const encrypted = this._encryptData(JSON.stringify(rpcs), this.config.SCRIPT_PASSWORD + chatId);
+            fs.writeFileSync(filePath, encrypted, 'utf8');
+            try { fs.chmodSync(filePath, 0o600); } catch (_) {}
+        } catch (e) {
+            console.error('Failed to save manual rpcs:', e);
+        }
     }
 
     getManualTokens(chatId, chainId) {
-        const filePath = path.join(projectRoot, `data/${chatId}_manual_tokens.json`);
-        if (fs.existsSync(filePath)) {
+        const encPath = path.join(projectRoot, `.data/${chatId}_manual_tokens.enc`);
+        const jsonPath = path.join(projectRoot, `.data/${chatId}_manual_tokens.json`);
+        
+        let allTokens = {};
+        if (fs.existsSync(encPath)) {
             try {
-                const allTokens = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-                return allTokens[chainId] || [];
+                const raw = fs.readFileSync(encPath, 'utf8');
+                const decrypted = this._decryptData(raw, this.config.SCRIPT_PASSWORD + chatId);
+                allTokens = JSON.parse(decrypted);
             } catch (e) {
-                return [];
+                allTokens = {};
+            }
+        } else if (fs.existsSync(jsonPath)) {
+            try {
+                allTokens = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+                const dir = path.join(projectRoot, '.data');
+                const encrypted = this._encryptData(JSON.stringify(allTokens), this.config.SCRIPT_PASSWORD + chatId);
+                fs.writeFileSync(encPath, encrypted, 'utf8');
+                try { fs.chmodSync(encPath, 0o600); } catch (_) {}
+                try { fs.unlinkSync(jsonPath); } catch (_) {}
+            } catch (e) {
+                allTokens = {};
             }
         }
-        return [];
+        return allTokens[chainId] || [];
     }
 
     saveManualToken(chatId, chainId, tokenInfo) {
-        const dir = path.join(projectRoot, 'data');
+        const dir = path.join(projectRoot, '.data');
         if (!fs.existsSync(dir)) {
             fs.mkdirSync(dir, { recursive: true });
         }
-        const filePath = path.join(dir, `${chatId}_manual_tokens.json`);
+        const encPath = path.join(dir, `${chatId}_manual_tokens.enc`);
+        const jsonPath = path.join(dir, `${chatId}_manual_tokens.json`);
+        
         let allTokens = {};
-        if (fs.existsSync(filePath)) {
+        if (fs.existsSync(encPath)) {
             try {
-                allTokens = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+                const raw = fs.readFileSync(encPath, 'utf8');
+                const decrypted = this._decryptData(raw, this.config.SCRIPT_PASSWORD + chatId);
+                allTokens = JSON.parse(decrypted);
+            } catch (e) {}
+        } else if (fs.existsSync(jsonPath)) {
+            try {
+                allTokens = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
             } catch (e) {}
         }
+        
         if (!allTokens[chainId]) {
             allTokens[chainId] = [];
         }
         if (!allTokens[chainId].some(t => t.address.toLowerCase() === tokenInfo.address.toLowerCase())) {
             allTokens[chainId].push(tokenInfo);
         }
-        fs.writeFileSync(filePath, JSON.stringify(allTokens, null, 2), 'utf8');
+        
+        try {
+            const encrypted = this._encryptData(JSON.stringify(allTokens), this.config.SCRIPT_PASSWORD + chatId);
+            fs.writeFileSync(encPath, encrypted, 'utf8');
+            try { fs.chmodSync(encPath, 0o600); } catch (_) {}
+            try { fs.unlinkSync(jsonPath); } catch (_) {}
+        } catch (e) {
+            console.error('Failed to save manual tokens:', e);
+        }
     }
 
     async showManualTransferMenu(chatId) {
@@ -1312,7 +1632,7 @@ class TelegramFullController {
 
         this.bot.sendMessage(chatId,
             `🔑 *EXPLORER API KEYS (MANUAL TRANSFER)*\n\n` +
-            `API Key ini disimpan secara terenkripsi di folder \`data/\` untuk mengambil riwayat transaksi Anda secara aman.\n\n` +
+            `API Key ini disimpan secara terenkripsi di folder \`.data/\` untuk mengambil riwayat transaksi Anda secara aman.\n\n` +
             `Pilih salah satu tombol di bawah untuk mengatur/mengubah kunci:`,
             { parse_mode: 'Markdown', reply_markup: { inline_keyboard: keyboard } }
         );
@@ -2073,18 +2393,31 @@ class TelegramFullController {
                     tfa.onPasswordChanged(userState.type, salt);
                 }
 
+                // Update approvedEnvHash di .integrity.lock agar restart tidak minta OTP lagi
+                try {
+                    const integrityGuard = require('../core/integrityGuard');
+                    const newEnvHash = integrityGuard._calculateEnvHash();
+                    integrityGuard._saveApprovedEnvHash(newEnvHash);
+                    console.log(`[Password Changed] approvedEnvHash diperbarui di .integrity.lock`);
+                } catch (e) {
+                    console.warn('⚠️ Gagal update approvedEnvHash:', e.message);
+                }
+
                 this.bot.sendMessage(chatId,
                     `✅ *Password ${label} berhasil diubah!*\n\n` +
-                    `Password baru sudah aktif, berlaku langsung tanpa restart.\n\n` +
                     (tfaStatus.active
-                        ? `⚠️ 2FA ${label} akan masuk grace period 7 hari karena password berubah.`
-                        : ''),
+                        ? `⚠️ 2FA ${label} akan masuk grace period 7 hari karena password berubah.\n\n`
+                        : '') +
+                    `🔄 _Bot akan restart otomatis dalam 60 detik untuk menerapkan perubahan..._`,
                     { parse_mode: 'Markdown' }
                 );
+
+                // Schedule auto-restart dalam 60 detik (sama seperti control.js)
+                this._scheduleMainBotRestart(chatId, `password_${userState.type}_changed`);
             } else {
                 this.bot.sendMessage(chatId, `❌ Gagal menyimpan password: ${result.msg}`);
+                this.showUbahSandiMenu(chatId);
             }
-            this.showUbahSandiMenu(chatId);
         }
     }
 
@@ -4699,6 +5032,39 @@ class TelegramFullController {
             case 'awaiting_notification_choice':
                 await this.processNotificationChatId(chatId, text);
                 break;
+            case 'owner_awaiting_pw_2fa_otp': {
+                // Verifikasi OTP 2FA sebelum ganti password Admin/Script
+                if (text.trim() === '/cancel') {
+                    this.userStates.delete(chatId);
+                    this.bot.sendMessage(chatId, '⏹️ Verifikasi 2FA dibatalkan.');
+                    this.showUbahSandiMenu(chatId);
+                    break;
+                }
+                const otpCode = text.trim();
+                const secret2FA = this._readSetup2FASecretFromEnv();
+                if (!secret2FA) {
+                    this.userStates.delete(chatId);
+                    this.bot.sendMessage(chatId, '⚠️ 2FA tidak tersedia. Akses dibatalkan.');
+                    this.showUbahSandiMenu(chatId);
+                    break;
+                }
+                if (this._verifySetup2FATOTP(secret2FA, otpCode)) {
+                    const pwType = userState.pwType || 'admin';
+                    const label = pwType === 'admin' ? 'Admin' : 'Script';
+                    this.userStates.delete(chatId);
+                    this.bot.sendMessage(chatId,
+                        `✅ *OTP Terverifikasi!* Memulai alur ganti Password ${label}...`,
+                        { parse_mode: 'Markdown' }
+                    ).catch(() => {});
+                    setTimeout(() => this.startOwnerChangePassword(chatId, pwType), 500);
+                } else {
+                    this.bot.sendMessage(chatId,
+                        `❌ *Kode OTP salah.* Silakan coba lagi atau ketik /cancel untuk membatalkan.`,
+                        { parse_mode: 'Markdown' }
+                    ).catch(() => {});
+                }
+                break;
+            }
             case 'owner_awaiting_new_password':
                 await this.processOwnerChangePassword(chatId, text, userState);
                 break;
@@ -4851,7 +5217,7 @@ class TelegramFullController {
 
         // Global: hentikan loading spinner di semua tombol sebelum proses apapun
         // (kecuali dapp_approval_toggle yang punya answerCallbackQuery sendiri dengan custom text)
-        if (data !== 'dapp_approval_toggle' && !data.startsWith('dapp_connect_approve_') && !data.startsWith('dapp_connect_reject_') && !data.startsWith('rpc_inject_usedbyother_')) {
+        if (data !== 'dapp_approval_toggle' && data !== 'dapp_approval_toggle_new' && data !== 'dapp_connection_info_alert' && data !== 'auto_approve_menu' && !data.startsWith('auto_approve_rpc_') && !data.startsWith('dapp_connect_approve_') && !data.startsWith('dapp_connect_reject_') && !data.startsWith('tx_approve_') && !data.startsWith('tx_reject_') && !data.startsWith('rpc_inject_usedbyother_')) {
             this.bot.answerCallbackQuery(query.id).catch(() => {});
         }
 
@@ -5120,40 +5486,15 @@ class TelegramFullController {
                     }
                 );
             }
-            // [v19.2] DApp Approval Toggle
+            // [v19.2] DApp Approval Toggle (Legacy - kept for compatibility but disabled/redirected)
             else if (data === 'dapp_approval_toggle') {
                 const cryptoApp = this.userSessions.get(chatId);
-                if (!cryptoApp) {
-                    await this.bot.answerCallbackQuery(query.id, {
-                        text: '❌ Sesi tidak ditemukan. Silakan /start ulang.',
-                        show_alert: true
-                    });
-                    return;
-                }
-
-                // Toggle status
-                cryptoApp.dappApprovalRequired = !cryptoApp.dappApprovalRequired;
-                cryptoApp.saveRpcConfig();
-
-                const newStatus = cryptoApp.dappApprovalRequired;
-                const statusEmoji = newStatus ? '🟢' : '🔴';
-                const statusText = newStatus ? 'ON' : 'OFF';
-
-                // Tampilkan banner/toast instan di Telegram
+                const activeRpcAuto = cryptoApp ? cryptoApp.isAutoApproveActive() : true;
+                const statusStr = activeRpcAuto ? 'Auto-Connect (Otomatis)' : 'Manual Approval (Konfirmasi)';
                 await this.bot.answerCallbackQuery(query.id, {
-                    text: `🔐 DApp Approval: ${statusText} ${statusEmoji}`,
-                    show_alert: false
+                    text: `🔐 Koneksi DApp: ${statusStr}. Silakan ubah via menu Auto Approve per RPC.`,
+                    show_alert: true
                 });
-
-                // Hapus message menu pengaturan yang lama
-                try {
-                    await this.bot.deleteMessage(chatId, query.message.message_id);
-                } catch (e) {
-                    // Abaikan jika sudah terhapus
-                }
-
-                // Refresh menu pengaturan dengan status baru
-                this.showPengaturanMenu(chatId);
             }
             // ── DApps menu callbacks ──
             else if (data === 'dapps_menu') {
@@ -5162,32 +5503,14 @@ class TelegramFullController {
                 } catch (e) {}
                 this.showDappsMenu(chatId);
             }
-            else if (data === 'dapp_approval_toggle_new') {
+            else if (data === 'dapp_approval_toggle_new' || data === 'dapp_connection_info_alert') {
                 const cryptoApp = this.userSessions.get(chatId);
-                if (!cryptoApp) {
-                    await this.bot.answerCallbackQuery(query.id, {
-                        text: '❌ Sesi tidak ditemukan. Silakan /start ulang.',
-                        show_alert: true
-                    });
-                    return;
-                }
-
-                cryptoApp.dappApprovalRequired = !cryptoApp.dappApprovalRequired;
-                cryptoApp.saveRpcConfig();
-
-                const newStatus = cryptoApp.dappApprovalRequired;
-                const statusEmoji = newStatus ? '🟢' : '🔴';
-                const statusText = newStatus ? 'ON' : 'OFF';
-
+                const activeRpcAuto = cryptoApp ? cryptoApp.isAutoApproveActive() : true;
+                const statusStr = activeRpcAuto ? 'Auto-Connect (Otomatis)' : 'Manual Approval (Konfirmasi)';
                 await this.bot.answerCallbackQuery(query.id, {
-                    text: `🔐 DApp Approval: ${statusText} ${statusEmoji}`,
-                    show_alert: false
+                    text: `🔐 Koneksi DApp: ${statusStr}.\n\nPengaturan ini mengikuti status Auto Approve dari RPC aktif Anda (${cryptoApp?.currentRpcName || 'N/A'}).\n\nUbah di menu "Auto Approve Tx per RPC" jika ingin menggantinya.`,
+                    show_alert: true
                 });
-
-                try {
-                    await this.bot.deleteMessage(chatId, query.message.message_id);
-                } catch (e) {}
-                this.showDappsMenu(chatId);
             }
             else if (data.startsWith('dapp_disconnect_')) {
                 const cryptoApp = this.userSessions.get(chatId);
@@ -5267,17 +5590,103 @@ class TelegramFullController {
                     show_alert: false
                 });
             }
+            // [v20.1] Auto Approve menu callback
+            else if (data === 'auto_approve_menu') {
+                try {
+                    await this.bot.deleteMessage(chatId, query.message.message_id);
+                } catch (e) {}
+                this.showAutoApproveTxMenu(chatId);
+            }
+            // [v20.1] Toggle Auto Approve per RPC
+            else if (data.startsWith('auto_approve_rpc_')) {
+                const rpcKey = data.replace('auto_approve_rpc_', '');
+                const rpc = cryptoApp.savedRpcs[rpcKey];
+                if (rpc) {
+                    rpc.autoApprove = rpc.autoApprove === undefined ? false : !rpc.autoApprove;
+                    cryptoApp.saveRpcConfig();
+                    
+                    const newStatus = rpc.autoApprove !== false;
+                    const statusText = newStatus ? 'Auto (🟢)' : 'Manual (🔴)';
+                    
+                    await this.bot.answerCallbackQuery(query.id, {
+                        text: `${rpc.name}: ${statusText}`,
+                        show_alert: false
+                    });
+                } else {
+                    await this.bot.answerCallbackQuery(query.id, {
+                        text: '❌ RPC tidak ditemukan.',
+                        show_alert: true
+                    });
+                }
+                
+                try {
+                    await this.bot.deleteMessage(chatId, query.message.message_id);
+                } catch (e) {}
+                this.showAutoApproveTxMenu(chatId);
+            }
+            // [v20.1] Transaction/Sign Approve/Reject callbacks
+            else if (data.startsWith('tx_approve_') || data.startsWith('tx_reject_')) {
+                const isApprove = data.startsWith('tx_approve_');
+                const approvalId = isApprove
+                    ? data.replace('tx_approve_', '')
+                    : data.replace('tx_reject_', '');
+
+                // Cari cryptoApp yang memiliki pending approval ini
+                let targetCryptoApp = null;
+                for (const [cid, app] of this.userSessions.entries()) {
+                    if (app.pendingTxApprovals && app.pendingTxApprovals.has(approvalId)) {
+                        targetCryptoApp = app;
+                        break;
+                    }
+                }
+
+                if (!targetCryptoApp) {
+                    await this.bot.answerCallbackQuery(query.id, {
+                        text: '⏰ Request sudah expired atau sudah diproses.',
+                        show_alert: true
+                    });
+                    return;
+                }
+
+                const result = targetCryptoApp.resolveTxApproval(approvalId, isApprove);
+
+                await this.bot.answerCallbackQuery(query.id, {
+                    text: isApprove ? '✅ Transaction Accepted!' : '❌ Transaction Rejected!',
+                    show_alert: false
+                });
+            }
             else if (data === 'menu_lainnya') {
                 this.showMenuLainnya(chatId);
             }
             else if (data === 'owner_change_password_menu') {
                 this.showUbahSandiMenu(chatId);
             }
-            else if (data === 'owner_change_admin_pw') {
-                this.startOwnerChangePassword(chatId, 'admin');
-            }
-            else if (data === 'owner_change_script_pw') {
-                this.startOwnerChangePassword(chatId, 'script');
+            else if (data === 'owner_change_admin_pw' || data === 'owner_change_script_pw') {
+                const pwType = data === 'owner_change_admin_pw' ? 'admin' : 'script';
+                // Cek apakah 2FA sudah dikonfigurasi — wajib verifikasi OTP sebelum ganti password
+                const setup2FASecret = this._readSetup2FASecretFromEnv();
+                if (!setup2FASecret) {
+                    // 2FA belum dikonfigurasi — izinkan langsung (sama seperti control.js)
+                    this.bot.sendMessage(chatId,
+                        `⚠️ *2FA belum dikonfigurasi.* Ganti password tanpa verifikasi.\n` +
+                        `Disarankan mengaktifkan 2FA melalui Controller Bot.`,
+                        { parse_mode: 'Markdown' }
+                    ).catch(() => {});
+                    this.startOwnerChangePassword(chatId, pwType);
+                } else {
+                    // 2FA ada — minta OTP dulu
+                    const label = pwType === 'admin' ? 'Admin' : 'Script';
+                    this.userStates.set(chatId, { action: 'owner_awaiting_pw_2fa_otp', pwType });
+                    this.bot.sendMessage(chatId,
+                        `🔐 *VERIFIKASI 2FA DIPERLUKAN*\n\n` +
+                        `Untuk mengganti *Password ${label}*, masukkan kode 6-digit OTP dari *Google Authenticator*.\n\n` +
+                        `_(Ketik /cancel untuk membatalkan)_`,
+                        {
+                            parse_mode: 'Markdown',
+                            reply_markup: { inline_keyboard: [[{ text: '❌ Batal', callback_data: 'owner_change_password_menu' }]] }
+                        }
+                    ).catch(() => {});
+                }
             }
             else if (data === 'owner_change_backup_pw') {
                 this.startChangeBackupPassword(chatId);
@@ -6479,7 +6888,7 @@ class TelegramFullController {
         const statusMsg = await this.bot.sendMessage(chatId, '⏳ *Sedang memproses dan mengenkripsi data backup Anda...*', { parse_mode: 'Markdown' });
 
         try {
-            const dataDir = path.join(projectRoot, 'data');
+            const dataDir = path.join(projectRoot, '.data');
             const backupBuffer = backupHelper.createBackup(chatId, password, dataDir);
 
             // Kirim file backup ke Telegram
@@ -6488,7 +6897,14 @@ class TelegramFullController {
                 backupBuffer,
                 {
                     caption: `🔐 *BACKUP DATA FASTARX BOT BERHASIL!*\n\n` +
-                             `File ini berisi data Wallet, RPC, Port, dan Morse Anda dalam bentuk terenkripsi.\n\n` +
+                             `File ini berisi seluruh data Anda dalam bentuk terenkripsi:\n` +
+                             `• Wallet & Master Key\n` +
+                             `• Konfigurasi RPC & Port\n` +
+                             `• Explorer API Keys\n` +
+                             `• Tracked Wallets & History\n` +
+                             `• Manual RPC & Token\n` +
+                             `• Pesan Morse Cipher\n` +
+                             `• Backup Password Guard\n\n` +
                              `⚠️ *PERINGATAN*: Jangan membagikan file ini kepada siapa pun. Jangan lupa password yang telah Anda buat.`
                 },
                 {
@@ -6517,7 +6933,7 @@ class TelegramFullController {
         const statusMsg = await this.bot.sendMessage(chatId, '⏳ *Sedang mendekripsi dan memulihkan data Anda...*', { parse_mode: 'Markdown' });
 
         try {
-            const dataDir = path.join(projectRoot, 'data');
+            const dataDir = path.join(projectRoot, '.data');
             const backupData = userState.backupData;
 
             // Panggil restoreBackup
@@ -6920,7 +7336,7 @@ class TelegramFullController {
     }
 
     resumeTrackerPollings() {
-        const dir = path.join(projectRoot, 'data');
+        const dir = path.join(projectRoot, '.data');
         if (!fs.existsSync(dir)) return;
         try {
             const files = fs.readdirSync(dir);
