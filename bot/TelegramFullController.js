@@ -18,6 +18,7 @@ const TokenTransfer = require('../transfer/TokenTransfer');
 const AutoTokenDetectionManager = require('../transfer/AutoTokenDetectionManager');
 const ModernUI = require('../core/ModernUI');
 const morse = require('../utils/morse');
+const locale = require('./locale');
 const morseMap = morse.parseMorseFile();         // legacy: untuk dekripsi pesan lama
 const allMorseCiphers = morse.getAllCiphers();    // baru: 273 versi cipher per-char random
 const morseStorage = require('../utils/morseStorage');
@@ -69,6 +70,7 @@ class TelegramFullController {
         this.userLoginMeta = new Map();
         // Transfer bot: simpan instance aktif per user
         this.transferInstances = new Map(); // chatId → { ethTransfer|tokenTransfer|autoDetect, type }
+        this.userLanguageCache = new Map();
 
         this.initBot();
         this.initSecuritySystem();
@@ -342,6 +344,64 @@ class TelegramFullController {
         if (this.config.TELEGRAM_BOT_TOKEN) {
             try {
                 this.bot = new TelegramBot(this.config.TELEGRAM_BOT_TOKEN, { polling: true });
+
+                // Wrap sendMessage for localization
+                const originalSendMessage = this.bot.sendMessage.bind(this.bot);
+                this.bot.sendMessage = async (chatId, text, options) => {
+                    try {
+                        const lang = await this.getUserLanguage(chatId);
+                        if (lang === 'en') {
+                            text = locale.translateText(text, lang);
+                            if (options && options.reply_markup) {
+                                options = Object.assign({}, options, {
+                                    reply_markup: locale.translateMarkup(options.reply_markup, lang)
+                                });
+                            }
+                        }
+                    } catch (err) {
+                        console.error('Error translating sendMessage:', err);
+                    }
+                    return originalSendMessage(chatId, text, options);
+                };
+
+                // Wrap sendDocument for localization
+                const originalSendDocument = this.bot.sendDocument.bind(this.bot);
+                this.bot.sendDocument = async (chatId, doc, options, fileOptions) => {
+                    try {
+                        const lang = await this.getUserLanguage(chatId);
+                        if (lang === 'en' && options) {
+                            if (options.caption) {
+                                options.caption = locale.translateText(options.caption, lang);
+                            }
+                            if (options.reply_markup) {
+                                options = Object.assign({}, options, {
+                                    reply_markup: locale.translateMarkup(options.reply_markup, lang)
+                                });
+                            }
+                        }
+                    } catch (err) {
+                        console.error('Error translating sendDocument:', err);
+                    }
+                    return originalSendDocument(chatId, doc, options, fileOptions);
+                };
+
+                // Wrap editMessageReplyMarkup for localization
+                const originalEditMessageReplyMarkup = this.bot.editMessageReplyMarkup.bind(this.bot);
+                this.bot.editMessageReplyMarkup = async (replyMarkup, options) => {
+                    try {
+                        const chatId = options ? (options.chat_id || (options.chat && options.chat.id)) : null;
+                        if (chatId) {
+                            const lang = await this.getUserLanguage(chatId);
+                            if (lang === 'en') {
+                                replyMarkup = locale.translateMarkup(replyMarkup, lang);
+                            }
+                        }
+                    } catch (err) {
+                        console.error('Error translating editMessageReplyMarkup:', err);
+                    }
+                    return originalEditMessageReplyMarkup(replyMarkup, options);
+                };
+
                 console.log('🤖 Telegram Bot (v20.0.0 - Generate Wallet & Backup Phrase) initialized');
                 this.setupBotHandlers();
             } catch (error) {
@@ -1457,6 +1517,49 @@ class TelegramFullController {
         }
     }
 
+    async getUserLanguage(chatId) {
+        const strChatId = String(chatId);
+        if (this.userLanguageCache && this.userLanguageCache.has(strChatId)) {
+            return this.userLanguageCache.get(strChatId);
+        }
+        const filePath = path.join(projectRoot, `.data/${chatId}_settings.enc`);
+        if (!fs.existsSync(filePath)) {
+            if (this.userLanguageCache) this.userLanguageCache.set(strChatId, 'id');
+            return 'id'; // default to Indonesian
+        }
+        try {
+            const raw = fs.readFileSync(filePath, 'utf8');
+            const decrypted = this._decryptData(raw, this.config.SCRIPT_PASSWORD + chatId);
+            const data = JSON.parse(decrypted);
+            const lang = data.language || 'id';
+            if (this.userLanguageCache) this.userLanguageCache.set(strChatId, lang);
+            return lang;
+        } catch (e) {
+            if (this.userLanguageCache) this.userLanguageCache.set(strChatId, 'id');
+            return 'id';
+        }
+    }
+
+    async setUserLanguage(chatId, lang) {
+        const strChatId = String(chatId);
+        if (this.userLanguageCache) {
+            this.userLanguageCache.set(strChatId, lang);
+        }
+        const dir = path.join(projectRoot, '.data');
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        const filePath = path.join(dir, `${chatId}_settings.enc`);
+        try {
+            const data = { language: lang };
+            const encrypted = this._encryptData(JSON.stringify(data), this.config.SCRIPT_PASSWORD + chatId);
+            fs.writeFileSync(filePath, encrypted, 'utf8');
+            try { fs.chmodSync(filePath, 0o600); } catch (_) {}
+            return true;
+        } catch (e) {
+            console.error('Failed to save user language settings:', e);
+            return false;
+        }
+    }
+
 
     _encryptData(text, password) {
         const salt = crypto.randomBytes(16);
@@ -2244,11 +2347,14 @@ class TelegramFullController {
     }
 
     // ─── MENU PENGATURAN (semua user) ───────────────────────────────────────
-    showPengaturanMenu(chatId) {
+    async showPengaturanMenu(chatId) {
         const isOwner = this.isOwner(chatId);
+        const lang = await this.getUserLanguage(chatId);
+        const langLabel = lang === 'en' ? '🌐 Language: 🇬🇧 English' : '🌐 Bahasa: 🇮🇩 Indonesia';
 
         const keyboard = [
             [{ text: '📊 Info & Status', callback_data: 'info_menu' }],
+            [{ text: langLabel, callback_data: 'change_language' }],
             [{ text: '🔐 Kelola 2FA', callback_data: '2fa_menu' }],
             [{ text: '🔑 Ubah Sandi', callback_data: 'owner_change_password_menu' }],
             [{ text: '📦 Migrasi/Backup Data', callback_data: 'migration_menu' }],
@@ -4915,8 +5021,26 @@ class TelegramFullController {
 
     async handleMessage(msg) {
         const chatId = msg.chat.id;
-        const text = msg.text;
+        let text = msg.text;
         if (!text) return;
+
+        // Translate back physical keyboard labels to Indonesian before matching
+        try {
+            const lang = await this.getUserLanguage(chatId);
+            if (lang === 'en') {
+                if (text === '📂 More Menus') {
+                    text = '📂 Menu Lainnya';
+                } else if (text === '⚙️ Settings') {
+                    text = '⚙️ Pengaturan';
+                } else if (text.toLowerCase() === 'yes' || text.toLowerCase() === 'y') {
+                    text = 'ya';
+                } else if (text.toLowerCase() === 'no' || text.toLowerCase() === 'n') {
+                    text = 'tidak';
+                }
+            }
+        } catch (e) {
+            console.error('Error translating incoming message text:', e);
+        }
 
         const userState = this.userStates.get(chatId);
 
@@ -5607,6 +5731,18 @@ class TelegramFullController {
 
             // ── Pengaturan callbacks ──
             else if (data === 'pengaturan_menu') {
+                this.showPengaturanMenu(chatId);
+            }
+            else if (data === 'change_language') {
+                const currentLang = await this.getUserLanguage(chatId);
+                const newLang = currentLang === 'en' ? 'id' : 'en';
+                await this.setUserLanguage(chatId, newLang);
+                
+                const successMsg = newLang === 'en' 
+                    ? '🇺🇸 Language changed to English successfully!' 
+                    : '🇮🇩 Bahasa berhasil diubah ke Bahasa Indonesia!';
+                
+                await this.bot.sendMessage(chatId, successMsg);
                 this.showPengaturanMenu(chatId);
             }
             else if (data === 'migration_menu') {

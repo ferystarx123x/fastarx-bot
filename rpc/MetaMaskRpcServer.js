@@ -203,7 +203,8 @@ class MetaMaskRpcServer {
 
             // Jika eth_accounts, kembalikan address hanya jika DApp sudah terkoneksi
             if (method === 'eth_accounts') {
-                if (!isConnected) {
+                const isExtension = !requestOrigin || requestOrigin.startsWith('chrome-extension://');
+                if (!isExtension && !isConnected) {
                     return { jsonrpc: '2.0', id, result: [] };
                 }
                 console.log(`[RPC Inject] 👛 ${method} → ${address}`);
