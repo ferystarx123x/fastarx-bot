@@ -79,7 +79,8 @@
 |-------|-----------|
 | **Two-Factor Auth (2FA)** | Google Authenticator (TOTP RFC 6238) untuk proteksi setup, login, dan persetujuan perubahan kode/konfigurasi |
 | **Dual Password System** | Password terpisah untuk akses Administrator dan Script |
-| **Proteksi Folder data/** | Deteksi otomatis jika folder data/ dihapus, bot memblokir startup dan meminta verifikasi OTP untuk memulihkan folder |
+| **Proteksi Folder .data/** | Deteksi otomatis jika folder tersembunyi .data/ dihapus, bot memblokir startup dan meminta verifikasi OTP untuk memulihkan folder |
+| **RAM-Cached Localization** | Sistem terjemahan multibahasa (ID/EN) instan yang dioptimalkan dengan memori RAM cache untuk menghindari kelambatan/delay dekripsi disk |
 | **Enkripsi AES-256-GCM** | Semua data wallet dienkripsi dengan standar militer |
 | **Enkripsi .env** | Seluruh nilai konfigurasi di `.env` dienkripsi (bukan plaintext) |
 | **Whitelist Chat ID** | Hanya Telegram ID yang terdaftar yang bisa mengakses bot |
@@ -355,29 +356,35 @@ Ketika Bot Utama dijalankan setelah ada perubahan file/konfigurasi:
 
 ## 🦊 Browser Extension
 
-Bot ini dilengkapi **dua versi browser extension** untuk kemudahan integrasi dengan DApp:
+Bot ini dilengkapi **tiga versi browser extension** untuk kemudahan integrasi dengan DApp:
 
 ### Chrome Extension (Manifest V3)
 > Lokasi: `fa-starx-extension-v4/`
-
 ```
 Versi    : 4.0.0
 Support  : Chrome, Brave, Edge (Chromium)
 ```
 
+### Bitget Wallet Extension (Manifest V3)
+> Lokasi: `extension bot bitget/`
+```
+Versi    : 1.0.0
+Support  : Chrome, Brave, Edge (Chromium)
+Deskripsi: Ekstensi khusus yang menyamar sebagai Bitget Wallet untuk menyalurkan request DApp secara aman ke server RPC Inject lokal.
+```
+
 ### Firefox Extension
 > Lokasi: `fastarx-firefox extension/`
-
 ```
 Support  : Firefox, Firefox ESR
 ```
 
 ### Cara Install Extension
 
-**Chrome:**
+**Chrome / Bitget Extension:**
 1. Buka `chrome://extensions/`
 2. Aktifkan **Developer Mode**
-3. Klik **Load unpacked** → pilih folder `fa-starx-extension-v4/`
+3. Klik **Load unpacked** → pilih folder extension yang diinginkan (`fa-starx-extension-v4/` atau `extension bot bitget/`)
 
 **Firefox:**
 1. Buka `about:debugging`
@@ -398,7 +405,7 @@ Untuk mencegah AI atau pihak tidak berwenang memodifikasi basis kode bot secara 
 * **Verifikasi OTP via Telegram**: Setiap ada perubahan kode/konfigurasi, Bot Utama menghubungi **Bot Saklar** secara lokal (HTTP port 3099). Bot Saklar mengirim notifikasi ke Telegram Admin dengan pesan yang **berbeda dan kontekstual** — pesan berbeda untuk perubahan konfigurasi `.env` vs modifikasi file kode program. Admin cukup memasukkan OTP 6 digit di Telegram, tanpa perlu akses terminal/SSH.
 * **Fallback CLI**: Jika Bot Saklar tidak aktif saat startup, sistem otomatis fallback ke input OTP/password via terminal.
 * **Auto-Recovery**: Jika file kunci integritas `.integrity.lock` hilang atau dirusak secara paksa, bot akan masuk ke mode pemulihan (recovery) dan meminta Password Admin untuk memulihkan database dari cadangan aman `.system-integrity-check`.
-* **Proteksi Folder data/**: Jika folder `data/` hilang atau sengaja dihapus, bot akan memblokir startup dan meminta verifikasi OTP sebelum memulihkan folder data kosong secara aman untuk mencegah bypass atau kehilangan kunci enkripsi sesi.
+* **Proteksi Folder .data/**: Jika folder tersembunyi `.data/` hilang atau sengaja dihapus, bot akan memblokir startup dan meminta verifikasi OTP sebelum memulihkan folder data kosong secara aman untuk mencegah bypass atau kehilangan kunci enkripsi sesi.
 
 ### Sistem Enkripsi
 
@@ -416,18 +423,18 @@ Untuk mencegah AI atau pihak tidak berwenang memodifikasi basis kode bot secara 
 - ✅ Jalankan bot hanya di server yang Anda percaya
 - ✅ Gunakan 2FA (Google Authenticator) untuk keamanan ekstra
 - ✅ Aktifkan **DApp Approval Mode** untuk mencegah koneksi tidak dikenal
-- ✅ Backup file `data/` secara berkala
-- ❌ Jangan pernah membagikan file `.env`, folder `data/`, atau berkas marker keamanan bertitik (`.*`)
+- ✅ Backup file `.data/` secara berkala
+- ❌ Jangan pernah membagikan file `.env`, folder `.data/`, atau berkas marker keamanan bertitik (`.*`)
 - ❌ Jangan expose port RPC Inject ke internet tanpa firewall
 
 ---
 
-## 📁 Struktur Direktori `data/`
+## 📁 Struktur Direktori `.data/`
 
-Data per-sesi disimpan di folder `data/` dengan format:
+Data per-sesi disimpan di folder tersembunyi `.data/` dengan format:
 
 ```
-data/
+.data/
 ├── <session_id>_wallets.enc        ← Wallet terenkripsi (AES-256-GCM)
 ├── <session_id>_rpc-config.json    ← Konfigurasi RPC & DApp
 ├── <session_id>_rpc-ports.json     ← Konfigurasi port RPC Inject
@@ -435,7 +442,7 @@ data/
 ├── <chat_id>_tracked_wallets.json  ← Daftar wallet pemantauan tracker
 ├── <chat_id>_tracker_state.json     ← Status aktif & cursor filter tracker
 ├── <chat_id>_tracker_history.json   ← Riwayat notifikasi transaksi tracker
-└── 2fa_*.json                      ← Data Google Authenticator
+└── .2fa_config.enc                 ← Konfigurasi 2FA terenkripsi
 ```
 
 > 🔐 File `*.enc` dan `*.key` tidak dapat dibaca tanpa kunci enkripsi yang sesuai.
