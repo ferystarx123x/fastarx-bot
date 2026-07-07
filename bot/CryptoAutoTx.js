@@ -64,6 +64,7 @@ class CryptoAutoTx {
 
         // [v19.2] DApp Connection Approval — Saklar persetujuan koneksi DApp
         this.dappApprovalRequired = false;  // false = auto-connect, true = manual approval via Telegram
+        this.globalDappApproval = false; // [v20.2] Global DApp Approval: true = selalu minta konfirmasi (tidak tergantung RPC)
         this.pendingDappApprovals = new Map(); // Map<approvalId, {resolve, reject, timer, details}>
         this._dappApprovalCounter = 0;
         this.connectedDapps = []; // Array of { id, url, name, connectedAt, via }
@@ -151,6 +152,10 @@ class CryptoAutoTx {
                     this.dappApprovalRequired = rpcConfig.dappApprovalRequired;
                 }
 
+                if (rpcConfig.globalDappApproval !== undefined) {
+                    this.globalDappApproval = rpcConfig.globalDappApproval;
+                }
+
                 if (rpcConfig.connectedDapps !== undefined) {
                     this.connectedDapps = rpcConfig.connectedDapps;
                 }
@@ -167,7 +172,7 @@ class CryptoAutoTx {
 
                 console.log(`[Session ${this.sessionId}] Loaded RPC configuration:`, this.currentRpcName);
                 console.log(`[Session ${this.sessionId}] Auto-Save RPC: ${this.autoSaveRpc ? 'ON' : 'OFF'}`);
-                console.log(`[Session ${this.sessionId}] DApp Connection (active RPC): ${this.isAutoApproveActive() ? 'OFF (Auto-Connect)' : 'ON (Manual)'}`);
+                console.log(`[Session ${this.sessionId}] DApp Connection: ${this.globalDappApproval ? 'ON (Global Manual)' : 'OFF (Ikut per-RPC)'}`);
                 console.log(`[Session ${this.sessionId}] Auto Approve Tx (active RPC): ${this.isAutoApproveActive() ? 'ON (Auto)' : 'OFF (Manual)'}`);
 
             } else {
@@ -208,6 +213,7 @@ class CryptoAutoTx {
                 savedRpcs: this.savedRpcs,
                 autoSaveRpc: this.autoSaveRpc,
                 dappApprovalRequired: this.dappApprovalRequired,
+                globalDappApproval: this.globalDappApproval,
                 connectedDapps: this.connectedDapps,
                 dappInactivityTimeout: this.dappInactivityTimeout,
                 updatedAt: new Date().toISOString()
@@ -2227,6 +2233,16 @@ class CryptoAutoTx {
     }
 
     /**
+     * [v20.2] Cek apakah DApp connection approval diperlukan.
+     * - globalDappApproval ON  → selalu minta konfirmasi (tidak tergantung RPC)
+     * - globalDappApproval OFF → ikut setting Auto Approve per RPC aktif
+     */
+    isDappConnectionApprovalRequired() {
+        if (this.globalDappApproval) return true;
+        return !this.isAutoApproveActive();
+    }
+
+    /**
      * Helper: Escape karakter Markdown khusus agar tidak break formatting.
      */
     _escapeMarkdown(text) {
@@ -2250,12 +2266,13 @@ class CryptoAutoTx {
                 via: 'WalletConnect'
             };
 
-            // [v19.2] DApp Approval Check
+            // [v20.2] DApp Approval Check — gunakan isDappConnectionApprovalRequired()
             const isConnected = this.isDappConnected(dappDetails.dappUrl);
-            const dappApprovalRequired = !this.isAutoApproveActive();
+            const dappApprovalRequired = this.isDappConnectionApprovalRequired();
 
             if (dappApprovalRequired && !isConnected) {
-                console.log(`[Session ${this.sessionId}] 🔐 DApp Approval ON (Manual RPC) — menunggu persetujuan user...`);
+                const approvalSource = this.globalDappApproval ? 'Global ON' : 'Manual RPC';
+                console.log(`[Session ${this.sessionId}] 🔐 DApp Approval ON (${approvalSource}) — menunggu persetujuan user...`);
                 try {
                     await this.requestDappApproval(dappDetails);
                     console.log(`[Session ${this.sessionId}] ✅ DApp disetujui oleh user.`);

@@ -220,9 +220,10 @@ class MetaMaskRpcServer {
                     via: `RPC Inject (Port ${this.port})`
                 };
 
-                const dappApprovalRequired = !this.cryptoApp.isAutoApproveActive();
+                const dappApprovalRequired = this.cryptoApp.isDappConnectionApprovalRequired();
                 if (dappApprovalRequired && !isConnected) {
-                    console.log(`[RPC Inject] 🔐 DApp Approval ON (Manual RPC) — menunggu persetujuan user untuk: ${dappOrigin}`);
+                    const approvalSource = this.cryptoApp.globalDappApproval ? 'Global ON' : 'Manual RPC';
+                    console.log(`[RPC Inject] 🔐 DApp Approval ON (${approvalSource}) — menunggu persetujuan user untuk: ${dappOrigin}`);
                     try {
                         await this.cryptoApp.requestDappApproval(dappDetails);
                         console.log(`[RPC Inject] ✅ DApp disetujui: ${dappOrigin}`);

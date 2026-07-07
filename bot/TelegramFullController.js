@@ -896,8 +896,10 @@ class TelegramFullController {
             return;
         }
 
-        const activeRpcAuto = cryptoApp.isAutoApproveActive();
-        const connectionApprovalLabel = `🔐 DApp Connection: ${activeRpcAuto ? '🔴 Auto-Connect' : '🟢 Manual Approval'}`;
+        const globalOn = cryptoApp.globalDappApproval;
+        const connectionLabel = globalOn
+            ? '🔐 DApp Connection: 🟢 ON (Global Manual)'
+            : '🔐 DApp Connection: 🔴 OFF (Ikut per-RPC)';
 
         const autoApproveLabel = '⚡ Auto Approve Tx: ⚙️ Kelola per RPC';
 
@@ -907,7 +909,7 @@ class TelegramFullController {
             : `⏱️ Auto-Disconnect: 🟢 ${timeout} Menit (klik untuk ubah)`;
 
         const keyboard = [
-            [{ text: connectionApprovalLabel, callback_data: 'dapp_connection_info_alert' }],
+            [{ text: connectionLabel, callback_data: 'dapp_connection_toggle' }],
             [{ text: autoApproveLabel, callback_data: 'auto_approve_menu' }],
             [{ text: timerLabel, callback_data: 'dapp_timer_settings' }]
         ];
@@ -930,7 +932,7 @@ class TelegramFullController {
                 dappsListText += `${idx + 1}. *${escapeMarkdown(dapp.name)}*\n` +
                                  `🔗 URL: \`${escapeMarkdown(dapp.url)}\`\n` +
                                  `📡 Via: ${escapeMarkdown(dapp.via)}\n` +
-                                 `🕒 Waktu: ${escapeMarkdown(connectedTime)}\n\n`;
+                                 `🕑 Waktu: ${escapeMarkdown(connectedTime)}\n\n`;
                 
                 // Tambahkan tombol disconnect untuk masing-masing DApp
                 keyboard.push([{ text: `❌ Disconnect: ${dapp.name}`, callback_data: `dapp_disconnect_${dapp.id}` }]);
@@ -940,7 +942,13 @@ class TelegramFullController {
         keyboard.push([{ text: '🔙 Kembali', callback_data: 'menu_lainnya' }]);
 
         const activeRpcName = cryptoApp.currentRpcName || 'Unknown';
-        const dappStatusInfo = `🔌 *DApp Connection:* ${activeRpcAuto ? '🔴 Auto-Connect' : '🟢 Manual Approval'} (Mengikuti RPC aktif: *${escapeMarkdown(activeRpcName)}*)`;
+        let dappStatusInfo;
+        if (globalOn) {
+            dappStatusInfo = `🔌 *DApp Connection:* 🟢 ON — Selalu minta konfirmasi (Global)`;
+        } else {
+            const activeRpcAuto = cryptoApp.isAutoApproveActive();
+            dappStatusInfo = `🔌 *DApp Connection:* 🔴 OFF — ${activeRpcAuto ? 'Auto-Connect' : 'Manual Approval'} (Ikut RPC: *${escapeMarkdown(activeRpcName)}*)`;
+        }
 
         let manualCount = 0;
         let autoCount = 0;
@@ -2440,7 +2448,7 @@ class TelegramFullController {
                     ],
                     [
                         { text: '📋 List/Pilih Wallet', callback_data: 'wallet_list' },
-                        { text: '🔑 Backup Phrase [BARU]', callback_data: 'wallet_backup_list' }
+                        { text: '🔑 Backup Phrase', callback_data: 'wallet_backup_list' }
                     ],
                     [
                         { text: '🗑️ Hapus Wallet', callback_data: 'wallet_delete_menu' }
@@ -2576,7 +2584,7 @@ class TelegramFullController {
     // [FITUR BARU] Lihat Backup Phrase di Telegram
     // ==============================================
 
-    async showBackupList(cryptoApp, chatId) {
+    async showBackupList(cryptoApp, chatId, page = 0) {
         try {
             const allWallets = await cryptoApp.listAllWalletsBackup();
 
@@ -2587,8 +2595,13 @@ class TelegramFullController {
                 return;
             }
 
+            const PAGE_SIZE = 5;
+            const start = page * PAGE_SIZE;
+            const pageItems = allWallets.slice(start, start + PAGE_SIZE);
+            const totalPages = Math.ceil(allWallets.length / PAGE_SIZE);
+
             const buttons = [];
-            allWallets.forEach((wallet) => {
+            pageItems.forEach((wallet) => {
                 const tag = wallet.mnemonic ? '🌱' : '🔑';
                 buttons.push([
                     {
@@ -2598,12 +2611,23 @@ class TelegramFullController {
                 ]);
             });
 
+            const navRow = [];
+            if (page > 0) {
+                navRow.push({ text: '⬅️ Sebelumnya', callback_data: `wl_bk_page_${page - 1}` });
+            }
+            if (start + PAGE_SIZE < allWallets.length) {
+                navRow.push({ text: '📂 Wallet Lainnya ➡️', callback_data: `wl_bk_page_${page + 1}` });
+            }
+            if (navRow.length > 0) buttons.push(navRow);
+
             buttons.push([{ text: '🔙 Kembali', callback_data: 'wallet_menu' }]);
 
-            this.bot.sendMessage(chatId,
-                `🔐 *BACKUP WALLET*\n\n` +
-                `🌱 = Ada Mnemonic   🔑 = Private Key Only\n\n` +
-                `Pilih wallet untuk lihat data backup:`,
+            let header = `🔐 *BACKUP WALLET*\n\n` +
+                `🌱 = Ada Mnemonic   🔑 = Private Key Only\n\n`;
+            if (totalPages > 1) header += `📄 Halaman ${page + 1}/${totalPages}\n\n`;
+            header += `Pilih wallet untuk lihat data backup:`;
+
+            this.bot.sendMessage(chatId, header,
                 { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } }
             );
 
@@ -2987,16 +3011,25 @@ class TelegramFullController {
     // WALLET MANAGEMENT (Fungsi Existing yang Diupdate)
     // ==============================================
 
-    async showDeleteWalletMenu(cryptoApp, chatId) {
+    async showDeleteWalletMenu(cryptoApp, chatId, page = 0) {
         try {
             const wallets = await cryptoApp.loadWallets();
-            if (Object.keys(wallets).length === 0) {
+            const walletEntries = Object.entries(wallets);
+            if (walletEntries.length === 0) {
                 this.bot.sendMessage(chatId, '📭 Tidak ada wallet untuk dihapus.');
                 return;
             }
 
+            const PAGE_SIZE = 5;
+            const start = page * PAGE_SIZE;
+            const pageItems = walletEntries.slice(start, start + PAGE_SIZE);
+            const totalPages = Math.ceil(walletEntries.length / PAGE_SIZE);
+
             const buttons = [];
-            Object.entries(wallets).forEach(([address, data]) => {
+            let message = 'Pilih wallet yang akan dihapus:';
+            if (totalPages > 1) message += `\n📄 Halaman ${page + 1}/${totalPages}`;
+
+            pageItems.forEach(([address, data]) => {
                 buttons.push([
                     {
                         text: `🗑️ ${data.nickname} (${address.slice(0, 6)}...)`,
@@ -3005,9 +3038,18 @@ class TelegramFullController {
                 ]);
             });
 
+            const navRow = [];
+            if (page > 0) {
+                navRow.push({ text: '⬅️ Sebelumnya', callback_data: `wl_del_page_${page - 1}` });
+            }
+            if (start + PAGE_SIZE < walletEntries.length) {
+                navRow.push({ text: '📂 Wallet Lainnya ➡️', callback_data: `wl_del_page_${page + 1}` });
+            }
+            if (navRow.length > 0) buttons.push(navRow);
+
             buttons.push([{ text: '🔙 Batal', callback_data: 'wallet_menu' }]);
 
-            this.bot.sendMessage(chatId, 'Pilih wallet yang akan dihapus:', {
+            this.bot.sendMessage(chatId, message, {
                 reply_markup: { inline_keyboard: buttons }
             });
         } catch (error) {
@@ -3264,22 +3306,29 @@ class TelegramFullController {
         }
     }
 
-    async listWallets(cryptoApp, chatId, callbackPrefix = 'wallet_select_') {
+    async listWallets(cryptoApp, chatId, callbackPrefix = 'wallet_select_', page = 0) {
         try {
             const wallets = await cryptoApp.loadWallets();
-            if (Object.keys(wallets).length === 0) {
+            const walletEntries = Object.entries(wallets);
+            if (walletEntries.length === 0) {
                 this.bot.sendMessage(chatId, '📭 Tidak ada wallet.');
                 return;
             }
 
+            const PAGE_SIZE = 5;
+            const start = page * PAGE_SIZE;
+            const pageItems = walletEntries.slice(start, start + PAGE_SIZE);
+            const totalPages = Math.ceil(walletEntries.length / PAGE_SIZE);
+
             let message = '💼 WALLET YANG DISIMPAN:\n\n';
+            if (totalPages > 1) message += `📄 Halaman ${page + 1}/${totalPages}\n\n`;
             const buttons = [];
 
-            Object.entries(wallets).forEach(([address, data], index) => {
+            pageItems.forEach(([address, data], index) => {
                 const isActive = cryptoApp.wallet?.address?.toLowerCase() === address.toLowerCase();
                 const hasMnemonic = data.mnemonic ? '🔐' : '🔑';
 
-                message += `${isActive ? '🟢 ' : '⚪️ '}${index + 1}. ${data.nickname} ${hasMnemonic}\n`;
+                message += `${isActive ? '🟢 ' : '⚪️ '}${start + index + 1}. ${data.nickname} ${hasMnemonic}\n`;
                 message += `   📍 \`${address}\`\n`;
                 message += `   📊 TX: ${data.initialTxCount || 0}\n\n`;
 
@@ -3290,6 +3339,18 @@ class TelegramFullController {
                     }
                 ]);
             });
+
+            // Pagination navigation
+            const navRow = [];
+            // Use prefix-based pagination key: wallet_select_ -> wl_sel_page_, wc_wallet_picked_ -> wl_wc_page_
+            const pagePrefix = callbackPrefix === 'wallet_select_' ? 'wl_sel_page_' : 'wl_wc_page_';
+            if (page > 0) {
+                navRow.push({ text: '⬅️ Sebelumnya', callback_data: `${pagePrefix}${page - 1}` });
+            }
+            if (start + PAGE_SIZE < walletEntries.length) {
+                navRow.push({ text: '📂 Wallet Lainnya ➡️', callback_data: `${pagePrefix}${page + 1}` });
+            }
+            if (navRow.length > 0) buttons.push(navRow);
 
             if (callbackPrefix === 'wallet_select_') {
                 buttons.push([{ text: '🔙 Kembali', callback_data: 'wallet_menu' }]);
@@ -3599,7 +3660,7 @@ class TelegramFullController {
         this.bot.sendMessage(chatId, '🌐 RPC MANAGEMENT:', menu);
     }
 
-    async showGasRpcSelection(cryptoApp, chatId) {
+    async showGasRpcSelection(cryptoApp, chatId, page = 0) {
         try {
             const rpcList = Object.entries(cryptoApp.savedRpcs);
             if (rpcList.length === 0) {
@@ -3607,15 +3668,21 @@ class TelegramFullController {
                 return;
             }
 
+            const PAGE_SIZE = 5;
+            const start = page * PAGE_SIZE;
+            const pageItems = rpcList.slice(start, start + PAGE_SIZE);
+            const totalPages = Math.ceil(rpcList.length / PAGE_SIZE);
+
             let message = '⛽ PILIH RPC UNTUK DIEDIT GAS-NYA:\n\n';
+            if (totalPages > 1) message += `📄 Halaman ${page + 1}/${totalPages}\n\n`;
             const buttons = [];
 
-            rpcList.forEach(([key, rpc], index) => {
+            pageItems.forEach(([key, rpc], index) => {
                 const gasMode = rpc.gasConfig?.mode || 'auto';
                 const gasVal = rpc.gasConfig?.value || 0;
                 const status = gasMode === 'auto' ? 'Auto' : (gasMode === 'manual' ? `${gasVal} Gwei` : `+${gasVal}%`);
 
-                message += `${index + 1}. ${rpc.name} [${status}]\n`;
+                message += `${start + index + 1}. ${rpc.name} [${status}]\n`;
 
                 buttons.push([
                     {
@@ -3624,6 +3691,15 @@ class TelegramFullController {
                     }
                 ]);
             });
+
+            const navRow = [];
+            if (page > 0) {
+                navRow.push({ text: '⬅️ Sebelumnya', callback_data: `rpc_gas_page_${page - 1}` });
+            }
+            if (start + PAGE_SIZE < rpcList.length) {
+                navRow.push({ text: '📂 RPC Lainnya ➡️', callback_data: `rpc_gas_page_${page + 1}` });
+            }
+            if (navRow.length > 0) buttons.push(navRow);
 
             buttons.push([{ text: '🔙 Kembali', callback_data: 'rpc_menu' }]);
 
@@ -3805,7 +3881,7 @@ class TelegramFullController {
         }
     }
 
-    async showEditRpcMenu(cryptoApp, chatId) {
+    async showEditRpcMenu(cryptoApp, chatId, page = 0) {
         try {
             const rpcList = Object.entries(cryptoApp.savedRpcs);
             if (rpcList.length === 0) {
@@ -3813,9 +3889,16 @@ class TelegramFullController {
                 return;
             }
 
-            const buttons = [];
+            const PAGE_SIZE = 5;
+            const start = page * PAGE_SIZE;
+            const pageItems = rpcList.slice(start, start + PAGE_SIZE);
+            const totalPages = Math.ceil(rpcList.length / PAGE_SIZE);
 
-            rpcList.forEach(([key, rpc]) => {
+            const buttons = [];
+            let message = 'Pilih RPC yang ingin Anda edit:';
+            if (totalPages > 1) message += `\n📄 Halaman ${page + 1}/${totalPages}`;
+
+            pageItems.forEach(([key, rpc]) => {
                 buttons.push([
                     {
                         text: `✏️ ${rpc.name}`,
@@ -3824,9 +3907,18 @@ class TelegramFullController {
                 ]);
             });
 
+            const navRow = [];
+            if (page > 0) {
+                navRow.push({ text: '⬅️ Sebelumnya', callback_data: `rpc_edit_page_${page - 1}` });
+            }
+            if (start + PAGE_SIZE < rpcList.length) {
+                navRow.push({ text: '📂 RPC Lainnya ➡️', callback_data: `rpc_edit_page_${page + 1}` });
+            }
+            if (navRow.length > 0) buttons.push(navRow);
+
             buttons.push([{ text: '🔙 Batal', callback_data: 'rpc_menu' }]);
 
-            this.bot.sendMessage(chatId, 'Pilih RPC yang ingin Anda edit:', {
+            this.bot.sendMessage(chatId, message, {
                 reply_markup: { inline_keyboard: buttons }
             });
 
@@ -4076,7 +4168,7 @@ class TelegramFullController {
         });
     }
 
-    async showDeleteRpcMenu(cryptoApp, chatId) {
+    async showDeleteRpcMenu(cryptoApp, chatId, page = 0) {
         try {
             const rpcList = Object.entries(cryptoApp.savedRpcs);
             if (rpcList.length === 0) {
@@ -4084,9 +4176,16 @@ class TelegramFullController {
                 return;
             }
 
-            const buttons = [];
+            const PAGE_SIZE = 5;
+            const start = page * PAGE_SIZE;
+            const pageItems = rpcList.slice(start, start + PAGE_SIZE);
+            const totalPages = Math.ceil(rpcList.length / PAGE_SIZE);
 
-            rpcList.forEach(([key, rpc]) => {
+            const buttons = [];
+            let message = 'Pilih RPC yang akan dihapus:';
+            if (totalPages > 1) message += `\n📄 Halaman ${page + 1}/${totalPages}`;
+
+            pageItems.forEach(([key, rpc]) => {
                 if (cryptoApp.currentRpc === rpc.rpc) {
                     buttons.push([{ text: `🟢 ${rpc.name} (Aktif)`, callback_data: 'rpc_delete_active' }]);
                 } else {
@@ -4099,9 +4198,18 @@ class TelegramFullController {
                 }
             });
 
+            const navRow = [];
+            if (page > 0) {
+                navRow.push({ text: '⬅️ Sebelumnya', callback_data: `rpc_del_page_${page - 1}` });
+            }
+            if (start + PAGE_SIZE < rpcList.length) {
+                navRow.push({ text: '📂 RPC Lainnya ➡️', callback_data: `rpc_del_page_${page + 1}` });
+            }
+            if (navRow.length > 0) buttons.push(navRow);
+
             buttons.push([{ text: '🔙 Batal', callback_data: 'rpc_menu' }]);
 
-            this.bot.sendMessage(chatId, 'Pilih RPC yang akan dihapus:', {
+            this.bot.sendMessage(chatId, message, {
                 reply_markup: { inline_keyboard: buttons }
             });
 
@@ -4131,7 +4239,7 @@ class TelegramFullController {
         }
     }
 
-    async showRpcList(cryptoApp, chatId) {
+    async showRpcList(cryptoApp, chatId, page = 0) {
         try {
             const rpcList = Object.entries(cryptoApp.savedRpcs);
             if (rpcList.length === 0) {
@@ -4139,15 +4247,21 @@ class TelegramFullController {
                 return;
             }
 
+            const PAGE_SIZE = 5;
+            const start = page * PAGE_SIZE;
+            const pageItems = rpcList.slice(start, start + PAGE_SIZE);
+            const totalPages = Math.ceil(rpcList.length / PAGE_SIZE);
+
             let message = '📡 DAFTAR RPC:\n\n';
+            if (totalPages > 1) message += `📄 Halaman ${page + 1}/${totalPages}\n\n`;
             const buttons = [];
 
-            rpcList.forEach(([key, rpc], index) => {
+            pageItems.forEach(([key, rpc], index) => {
                 const isActive = cryptoApp.currentRpc === rpc.rpc;
                 const gasMode = rpc.gasConfig?.mode || 'auto';
                 const gasInfo = gasMode === 'auto' ? '' : ` (${rpc.gasConfig.value}${gasMode === 'manual' ? ' Gwei' : '%'})`;
 
-                message += `${isActive ? '🟢 ' : '⚪️ '}${index + 1}. ${rpc.name}${gasInfo}\n`;
+                message += `${isActive ? '🟢 ' : '⚪️ '}${start + index + 1}. ${rpc.name}${gasInfo}\n`;
                 message += `   🔗 ${rpc.rpc}\n`;
                 message += `   ⛓️ Chain: ${rpc.chainId}\n\n`;
 
@@ -4158,6 +4272,15 @@ class TelegramFullController {
                     }
                 ]);
             });
+
+            const navRow = [];
+            if (page > 0) {
+                navRow.push({ text: '⬅️ Sebelumnya', callback_data: `rpc_list_page_${page - 1}` });
+            }
+            if (start + PAGE_SIZE < rpcList.length) {
+                navRow.push({ text: '📂 RPC Lainnya ➡️', callback_data: `rpc_list_page_${page + 1}` });
+            }
+            if (navRow.length > 0) buttons.push(navRow);
 
             buttons.push([{ text: '🔙 Kembali', callback_data: 'rpc_menu' }]);
 
@@ -5255,6 +5378,10 @@ class TelegramFullController {
             else if (data === 'wallet_backup_list') {
                 await this.showBackupList(cryptoApp, chatId);
             }
+            else if (data.startsWith('wl_bk_page_')) {
+                const page = parseInt(data.replace('wl_bk_page_', ''));
+                await this.showBackupList(cryptoApp, chatId, page);
+            }
             else if (data.startsWith('wallet_show_backup_')) {
                 const address = data.replace('wallet_show_backup_', '');
                 await this.requestBackupUnlock(cryptoApp, chatId, address);
@@ -5296,6 +5423,19 @@ class TelegramFullController {
             else if (data.startsWith('wallet_delete_exec_')) {
                 const address = data.replace('wallet_delete_exec_', '');
                 await this.executeDeleteWallet(cryptoApp, chatId, address);
+            }
+            // Wallet Pagination
+            else if (data.startsWith('wl_del_page_')) {
+                const page = parseInt(data.replace('wl_del_page_', ''));
+                await this.showDeleteWalletMenu(cryptoApp, chatId, page);
+            }
+            else if (data.startsWith('wl_sel_page_')) {
+                const page = parseInt(data.replace('wl_sel_page_', ''));
+                await this.listWallets(cryptoApp, chatId, 'wallet_select_', page);
+            }
+            else if (data.startsWith('wl_wc_page_')) {
+                const page = parseInt(data.replace('wl_wc_page_', ''));
+                await this.listWallets(cryptoApp, chatId, 'wc_wallet_picked_', page);
             }
 
             // WalletConnect
@@ -5401,6 +5541,23 @@ class TelegramFullController {
                 this.bot.answerCallbackQuery(query.id, { text: `✅ Auto-Save RPC: ${statusText}`, show_alert: false });
                 this.showRpcMenu(cryptoApp, chatId);
             }
+            // RPC Pagination
+            else if (data.startsWith('rpc_list_page_')) {
+                const page = parseInt(data.replace('rpc_list_page_', ''));
+                await this.showRpcList(cryptoApp, chatId, page);
+            }
+            else if (data.startsWith('rpc_edit_page_')) {
+                const page = parseInt(data.replace('rpc_edit_page_', ''));
+                await this.showEditRpcMenu(cryptoApp, chatId, page);
+            }
+            else if (data.startsWith('rpc_del_page_')) {
+                const page = parseInt(data.replace('rpc_del_page_', ''));
+                await this.showDeleteRpcMenu(cryptoApp, chatId, page);
+            }
+            else if (data.startsWith('rpc_gas_page_')) {
+                const page = parseInt(data.replace('rpc_gas_page_', ''));
+                await this.showGasRpcSelection(cryptoApp, chatId, page);
+            }
 
             // Gas Management
             else if (data === 'rpc_gas_menu') {
@@ -5489,12 +5646,17 @@ class TelegramFullController {
             // [v19.2] DApp Approval Toggle (Legacy - kept for compatibility but disabled/redirected)
             else if (data === 'dapp_approval_toggle') {
                 const cryptoApp = this.userSessions.get(chatId);
-                const activeRpcAuto = cryptoApp ? cryptoApp.isAutoApproveActive() : true;
-                const statusStr = activeRpcAuto ? 'Auto-Connect (Otomatis)' : 'Manual Approval (Konfirmasi)';
-                await this.bot.answerCallbackQuery(query.id, {
-                    text: `🔐 Koneksi DApp: ${statusStr}. Silakan ubah via menu Auto Approve per RPC.`,
-                    show_alert: true
-                });
+                if (cryptoApp) {
+                    cryptoApp.globalDappApproval = !cryptoApp.globalDappApproval;
+                    cryptoApp.saveRpcConfig();
+                    const statusStr = cryptoApp.globalDappApproval ? '🟢 ON (Global Manual)' : '🔴 OFF (Ikut per-RPC)';
+                    await this.bot.answerCallbackQuery(query.id, {
+                        text: `🔐 DApp Connection: ${statusStr}`,
+                        show_alert: false
+                    });
+                    try { await this.bot.deleteMessage(chatId, query.message.message_id); } catch (e) {}
+                    this.showDappsMenu(chatId);
+                }
             }
             // ── DApps menu callbacks ──
             else if (data === 'dapps_menu') {
@@ -5503,14 +5665,19 @@ class TelegramFullController {
                 } catch (e) {}
                 this.showDappsMenu(chatId);
             }
-            else if (data === 'dapp_approval_toggle_new' || data === 'dapp_connection_info_alert') {
+            else if (data === 'dapp_connection_toggle' || data === 'dapp_approval_toggle_new' || data === 'dapp_connection_info_alert') {
                 const cryptoApp = this.userSessions.get(chatId);
-                const activeRpcAuto = cryptoApp ? cryptoApp.isAutoApproveActive() : true;
-                const statusStr = activeRpcAuto ? 'Auto-Connect (Otomatis)' : 'Manual Approval (Konfirmasi)';
-                await this.bot.answerCallbackQuery(query.id, {
-                    text: `🔐 Koneksi DApp: ${statusStr}.\n\nPengaturan ini mengikuti status Auto Approve dari RPC aktif Anda (${cryptoApp?.currentRpcName || 'N/A'}).\n\nUbah di menu "Auto Approve Tx per RPC" jika ingin menggantinya.`,
-                    show_alert: true
-                });
+                if (cryptoApp) {
+                    cryptoApp.globalDappApproval = !cryptoApp.globalDappApproval;
+                    cryptoApp.saveRpcConfig();
+                    const statusStr = cryptoApp.globalDappApproval ? '🟢 ON (Global Manual)' : '🔴 OFF (Ikut per-RPC)';
+                    await this.bot.answerCallbackQuery(query.id, {
+                        text: `🔐 DApp Connection: ${statusStr}`,
+                        show_alert: false
+                    });
+                    try { await this.bot.deleteMessage(chatId, query.message.message_id); } catch (e) {}
+                    this.showDappsMenu(chatId);
+                }
             }
             else if (data.startsWith('dapp_disconnect_')) {
                 const cryptoApp = this.userSessions.get(chatId);
