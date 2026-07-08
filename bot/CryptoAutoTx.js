@@ -4201,7 +4201,6 @@ class CryptoAutoTx {
         console.log(`[Session ${this.sessionId}] solana_signMessage completed`);
         return { signatureHex };
     }
-
     async getActiveAptosAccount() {
         try {
             if (!this.wallet) return null;

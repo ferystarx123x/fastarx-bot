@@ -3,9 +3,38 @@
   "version": "20.0.0",
   "description": "FA STARX BOT - Multi-Chain Transfer Bot with WalletConnect & MetaMask RPC Inject",
   "main": "main.js",
+  "bin": "control.js",
   "scripts": {
     "start": "node main.js",
-    "dev": "node --watch main.js"
+    "dev": "node --watch main.js",
+    "build": "pkg . --targets node18-linux-x64 --output control"
+  },
+  "pkg": {
+    "assets": [
+      "bot/**/*.js",
+      "core/**/*.js",
+      "auth/**/*.js",
+      "utils/**/*.js",
+      "rpc/**/*.js",
+      "auto/**/*.js",
+      "config/**/*.js",
+      "transfer/**/*.js",
+      "modes/**/*.js",
+      "main.js",
+      "setup.js",
+      "setupgithub.js",
+      ".security/.admin-password-secure",
+      ".security/.dual-backup-evidence",
+      ".security/.env",
+      ".security/.fastarx-ultra-secure",
+      ".security/.github-validation-lock",
+      ".security/.integrity.lock",
+      ".security/.permanent-security",
+      ".security/.secure-backup-marker",
+      ".security/.security-system-marker",
+      ".security/.system-integrity-check"
+    ],
+    "outputPath": "."
   },
   "dependencies": {
     "@aptos-labs/ts-sdk": "^7.2.0",

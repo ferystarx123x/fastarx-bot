@@ -20,6 +20,8 @@ const readline = require('readline');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const isPkg = typeof process.pkg !== 'undefined';
+const projectRoot = isPkg ? path.dirname(process.execPath) : __dirname;
 
 // ─── Konstanta ────────────────────────────────────────────────────────────────
 
@@ -102,7 +104,7 @@ function readEnvField(envContent, fieldName) {
 }
 
 function getApprovedHash() {
-    const lockPath = path.join(__dirname, '.integrity.lock');
+    const lockPath = path.join(projectRoot, '.security', '.integrity.lock');
     if (!fs.existsSync(lockPath)) return '';
     try {
         const data = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
@@ -321,7 +323,9 @@ async function main() {
     console.log('╚══════════════════════════════════════════════════════╝');
     console.log(RESET + '');
 
-    const envPath = path.join(__dirname, '.env');
+    const envPath = path.join(projectRoot, '.security', '.env');
+    const secDir = path.join(projectRoot, '.security');
+    if (!fs.existsSync(secDir)) fs.mkdirSync(secDir, { recursive: true });
 
     // ── KONDISI 1: Tidak ada .env ──────────────────────────────────
     if (!fs.existsSync(envPath)) {

@@ -6,9 +6,15 @@
  */
 'use strict';
 
-// Load .env PERTAMA sebelum apapun
+const path = require('path');
+const fs = require('fs');
 const dotenv = require('dotenv');
-dotenv.config({ override: true });
+
+const isPkg = typeof process.pkg !== 'undefined';
+const projectRoot = isPkg ? path.dirname(process.execPath) : __dirname;
+const envPath = path.join(projectRoot, '.security', '.env');
+
+dotenv.config({ path: envPath, override: true });
 
 // Global safety net — mencegah bot mati total akibat error tak terduga
 process.on('unhandledRejection', (reason, promise) => {
@@ -35,7 +41,7 @@ async function main() {
         await integrityGuard.verify();
         
         // Reload .env untuk memperbarui nilai process.env setelah re-enkripsi selesai
-        dotenv.config({ override: true });
+        dotenv.config({ path: envPath, override: true });
 
         await ui.showAnimatedBanner(1, 0);
         const SECURE_CONFIG = loadConfiguration();
@@ -47,6 +53,32 @@ async function main() {
             console.log('✅ Telegram Bot Active!');
             console.log('📱 Fitur baru: Generate Wallet & Backup Phrase tersedia!');
             console.log('🔐 Login via: /start di Bot Anda');
+
+            // Kirim notifikasi ke Controller Bot bahwa Bot Utama sudah aktif
+            try {
+                const http = require('http');
+                const port = process.env.CONTROLLER_HTTP_PORT || 3099;
+                const body = JSON.stringify({
+                    version: '20.0.0',
+                    timestamp: new Date().toISOString()
+                });
+                const req = http.request({
+                    hostname: '127.0.0.1',
+                    port,
+                    path: '/notify-ready',
+                    method: 'POST',
+                    timeout: 5000,
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Content-Length': Buffer.byteLength(body)
+                    }
+                }, () => {}); // fire-and-forget
+                req.on('error', () => {}); // Controller mungkin offline — abaikan
+                req.write(body);
+                req.end();
+            } catch (e) {
+                // Abaikan jika gagal — Controller mungkin tidak aktif
+            }
 
             process.on('SIGINT', async () => {
                 console.log('\n👋 Bot stopped by user (Ctrl+C). Cleaning up Telegram Bot...');
