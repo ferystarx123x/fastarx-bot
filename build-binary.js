@@ -209,7 +209,7 @@ function prepareTempFromFiles(files) {
 // Online Mode SELALU pakai link tertanam ini (tanpa prompt, tanpa override).
 // Format ciphertext: base64(data):hex(iv) — AES-256-CBC, static key (pola controlv2/server.js).
 // >>> EMBEDDED_WSS_START (JANGAN diedit manual — dikelola rebuild-binary.js) <<<
-const EMBEDDED_WSS = '/v7p806e8w06APJnRRWszgcEvBs7FoZvEy2sgwxNjM4=:a521b4dcdbafff09dd4b842f7c3284ac';
+const EMBEDDED_WSS = '9qEMLgpkF5IvNdCU9+hLKAf7rUjcpOlqx4Zs1vi4jMs=:17a8302526a66aa12e518ad2cacf493c';
 // >>> EMBEDDED_WSS_END <<<
 
 // Decrypt link WSS tertanam. Static key harus IDENTIK dgn getDynamicConfigKeyStatic()

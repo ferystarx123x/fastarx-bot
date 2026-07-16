@@ -29,19 +29,30 @@
   "dependencies": {
     "@aptos-labs/ts-sdk": "^7.2.0",
     "@mysten/sui": "^2.20.1",
+    "@polkadot/keyring": "^14.0.3",
+    "@polkadot/util-crypto": "^14.0.3",
     "@solana/web3.js": "^1.98.4",
     "@ton/core": "^0.63.1",
     "@ton/crypto": "^3.3.0",
     "@ton/ton": "^16.3.0",
     "@walletconnect/sign-client": "^2.23.8",
+    "algosdk": "^3.6.0",
+    "bip32": "^4.0.0",
+    "bitcoinjs-lib": "^6.1.7",
     "dotenv": "^16.0.0",
+    "ecpair": "^2.1.0",
     "ed25519-hd-key": "^2.0.0",
     "ethers": "^6.16.0",
     "near-api-js": "^7.2.0",
     "node-os-utils": "^2.0.1",
     "node-telegram-bot-api": "^0.64.0",
+    "starknet": "^6.11.0",
+    "stellar-sdk": "^13.3.0",
     "systeminformation": "^5.31.4",
-    "ws": "^8.18.0"
+    "tiny-secp256k1": "^2.2.3",
+    "tronweb": "^6.0.0",
+    "ws": "^8.18.0",
+    "xrpl": "^5.0.0"
   },
   "engines": {
     "node": ">=18.0.0"

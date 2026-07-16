@@ -9,7 +9,6 @@ const PROTECTED_DIRS = [
     'bot',
     'utils',
     'core',
-    'transfer',
     'config',
     'modes',
     'auth',

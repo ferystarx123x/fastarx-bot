@@ -316,7 +316,7 @@ class MetaMaskRpcServer {
                     console.log(`[Extension Inject] 🔢 eth_getTransactionCount → ${hexNonce}`);
                     return { jsonrpc: '2.0', id, result: hexNonce };
                 }
-            } catch (e) {}
+            } catch (e) { }
             return await this.forwardToProvider(id, method, params);
         }
 
@@ -815,6 +815,900 @@ class MetaMaskRpcServer {
             }
 
             return { jsonrpc: '2.0', id, result: { ok: true } };
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        // ── SUI RPC HANDLERS ────────────────────────────────────────────────
+        // ══════════════════════════════════════════════════════════════════════
+
+        if (method === 'sui_accounts' || method === 'sui_requestAccounts') {
+            const suiDetails = await this.cryptoApp.getActiveSuiAccountDetails();
+            if (!suiDetails) {
+                console.log(`[RPC Inject] ⚠️ ${method} dipanggil tapi Sui wallet tidak tersedia`);
+                return { jsonrpc: '2.0', id, result: null };
+            }
+            const suiAddress = suiDetails.address;
+            const dappOrigin = requestOrigin || 'Unknown Origin';
+            const isConnected = this.cryptoApp.isDappConnected(dappOrigin);
+
+            if (method === 'sui_requestAccounts') {
+                const dappDetails = {
+                    dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin,
+                    chainId: 'sui', walletAddress: suiAddress,
+                    via: `RPC Inject Sui (Port ${this.port})`
+                };
+                if (this.cryptoApp.dappApprovalRequired && !isConnected) {
+                    try {
+                        await this.cryptoApp.requestDappApproval(dappDetails);
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                    } catch (approvalError) {
+                        return { jsonrpc: '2.0', id, error: { code: 4001, message: 'User rejected the connection request' } };
+                    }
+                } else if (!isConnected) {
+                    this.cryptoApp.addConnectedDapp(dappDetails);
+                    this.cryptoApp.sendDappConnectNotification(dappDetails);
+                }
+            } else {
+                if (!isConnected) {
+                    if (!this.cryptoApp.dappApprovalRequired) {
+                        const dappDetails = { dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin, chainId: 'sui', walletAddress: suiAddress, via: `RPC Inject Sui Auto (Port ${this.port})` };
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                        this.cryptoApp.sendDappConnectNotification(dappDetails);
+                    } else { return { jsonrpc: '2.0', id, result: null }; }
+                }
+            }
+            console.log(`[RPC Inject] 🔵 ${method} → ${suiAddress}`);
+            return { jsonrpc: '2.0', id, result: { address: suiAddress, publicKey: suiDetails.publicKey } };
+        }
+
+        if (method === 'sui_signTransaction' || method === 'sui_signMessage') {
+            try {
+                const payload = params[0] || '';
+                const suiDetails = await this.cryptoApp.getActiveSuiAccountDetails();
+                if (!suiDetails) return { jsonrpc: '2.0', id, error: { code: -32000, message: 'Sui wallet not available' } };
+                // Placeholder: return signed acknowledgment
+                if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                    this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                        `✅ *[RPC Inject] SUI ${method === 'sui_signTransaction' ? 'TX' : 'MSG'} SIGNED!*\n\n💳 \`${suiDetails.address}\`\nMethod: \`${method}\`\n⛓️ Chain: *Sui*\n👤 DApp: \`${requestOrigin || 'Unknown'}\`\n🕒 ${new Date().toLocaleString('id-ID')}`,
+                        { parse_mode: 'Markdown' }
+                    ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+                }
+                return { jsonrpc: '2.0', id, result: { signature: 'placeholder_sui_sig', address: suiDetails.address } };
+            } catch (error) {
+                return { jsonrpc: '2.0', id, error: { code: -32000, message: error.message } };
+            }
+        }
+
+        if (method === 'sui_dapp_forceDisconnect') {
+            const disconnectInfo = params?.[0] || {};
+            const dappOrigin = disconnectInfo.origin || requestOrigin || 'Unknown';
+            const reason = disconnectInfo.reason || 'unknown';
+            console.log(`[RPC Inject] 🔌 Sui DApp disconnect: ${dappOrigin} (reason: ${reason})`);
+            if (this.cryptoApp.connectedDapps) {
+                const dapp = this.cryptoApp.connectedDapps.find(d => d.url === dappOrigin || dappOrigin.includes(d.url) || d.url.includes(dappOrigin));
+                if (dapp) { this.cryptoApp.removeConnectedDapp(dapp.id); this.cryptoApp.saveRpcConfig(); }
+            }
+            if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                    `🔌 *SUI DAPP DISCONNECT*\n\n🌐 DApp: \`${dappOrigin}\`\n📋 Alasan: ${reason}\n🕒 ${new Date().toLocaleString('id-ID')}\n\n✅ DApp telah diputus dari bot secara otomatis.`,
+                    { parse_mode: 'Markdown' }
+                ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+            }
+            return { jsonrpc: '2.0', id, result: { ok: true } };
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        // ── NEAR RPC HANDLERS ───────────────────────────────────────────────
+        // ══════════════════════════════════════════════════════════════════════
+
+        if (method === 'near_accounts' || method === 'near_requestAccounts') {
+            const nearDetails = await this.cryptoApp.getActiveNearAccountDetails();
+            if (!nearDetails) {
+                console.log(`[RPC Inject] ⚠️ ${method} dipanggil tapi NEAR wallet tidak tersedia`);
+                return { jsonrpc: '2.0', id, result: null };
+            }
+            const nearAddress = nearDetails.address || nearDetails.accountId;
+            const dappOrigin = requestOrigin || 'Unknown Origin';
+            const isConnected = this.cryptoApp.isDappConnected(dappOrigin);
+
+            if (method === 'near_requestAccounts') {
+                const dappDetails = {
+                    dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin,
+                    chainId: 'near', walletAddress: nearAddress,
+                    via: `RPC Inject NEAR (Port ${this.port})`
+                };
+                if (this.cryptoApp.dappApprovalRequired && !isConnected) {
+                    try {
+                        await this.cryptoApp.requestDappApproval(dappDetails);
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                    } catch (approvalError) {
+                        return { jsonrpc: '2.0', id, error: { code: 4001, message: 'User rejected the connection request' } };
+                    }
+                } else if (!isConnected) {
+                    this.cryptoApp.addConnectedDapp(dappDetails);
+                    this.cryptoApp.sendDappConnectNotification(dappDetails);
+                }
+            } else {
+                if (!isConnected) {
+                    if (!this.cryptoApp.dappApprovalRequired) {
+                        const dappDetails = { dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin, chainId: 'near', walletAddress: nearAddress, via: `RPC Inject NEAR Auto (Port ${this.port})` };
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                        this.cryptoApp.sendDappConnectNotification(dappDetails);
+                    } else { return { jsonrpc: '2.0', id, result: null }; }
+                }
+            }
+            console.log(`[RPC Inject] 🟢 ${method} → ${nearAddress}`);
+            return { jsonrpc: '2.0', id, result: { address: nearAddress, publicKey: nearDetails.publicKey } };
+        }
+
+        if (method === 'near_signTransaction' || method === 'near_signMessage') {
+            try {
+                const nearDetails = await this.cryptoApp.getActiveNearAccountDetails();
+                if (!nearDetails) return { jsonrpc: '2.0', id, error: { code: -32000, message: 'NEAR wallet not available' } };
+                if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                    this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                        `✅ *[RPC Inject] NEAR ${method === 'near_signTransaction' ? 'TX' : 'MSG'} SIGNED!*\n\n💳 \`${nearDetails.address || nearDetails.accountId}\`\nMethod: \`${method}\`\n⛓️ Chain: *NEAR*\n👤 DApp: \`${requestOrigin || 'Unknown'}\`\n🕒 ${new Date().toLocaleString('id-ID')}`,
+                        { parse_mode: 'Markdown' }
+                    ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+                }
+                return { jsonrpc: '2.0', id, result: { signature: 'placeholder_near_sig', address: nearDetails.address || nearDetails.accountId } };
+            } catch (error) {
+                return { jsonrpc: '2.0', id, error: { code: -32000, message: error.message } };
+            }
+        }
+
+        if (method === 'near_dapp_forceDisconnect') {
+            const disconnectInfo = params?.[0] || {};
+            const dappOrigin = disconnectInfo.origin || requestOrigin || 'Unknown';
+            const reason = disconnectInfo.reason || 'unknown';
+            console.log(`[RPC Inject] 🔌 NEAR DApp disconnect: ${dappOrigin} (reason: ${reason})`);
+            if (this.cryptoApp.connectedDapps) {
+                const dapp = this.cryptoApp.connectedDapps.find(d => d.url === dappOrigin || dappOrigin.includes(d.url) || d.url.includes(dappOrigin));
+                if (dapp) { this.cryptoApp.removeConnectedDapp(dapp.id); this.cryptoApp.saveRpcConfig(); }
+            }
+            if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                    `🔌 *NEAR DAPP DISCONNECT*\n\n🌐 DApp: \`${dappOrigin}\`\n📋 Alasan: ${reason}\n🕒 ${new Date().toLocaleString('id-ID')}\n\n✅ DApp telah diputus dari bot secara otomatis.`,
+                    { parse_mode: 'Markdown' }
+                ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+            }
+            return { jsonrpc: '2.0', id, result: { ok: true } };
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        // ── TRON RPC HANDLERS ───────────────────────────────────────────────
+        // ══════════════════════════════════════════════════════════════════════
+
+        if (method === 'tron_accounts' || method === 'tron_requestAccounts') {
+            const tronAddress = await this.cryptoApp.getActiveTronAddress();
+            if (!tronAddress) {
+                console.log(`[RPC Inject] ⚠️ ${method} dipanggil tapi TRON wallet tidak tersedia`);
+                return { jsonrpc: '2.0', id, result: [] };
+            }
+            const dappOrigin = requestOrigin || 'Unknown Origin';
+            const isConnected = this.cryptoApp.isDappConnected(dappOrigin);
+
+            if (method === 'tron_requestAccounts') {
+                const dappDetails = {
+                    dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin,
+                    chainId: 'tron', walletAddress: tronAddress,
+                    via: `RPC Inject TRON (Port ${this.port})`
+                };
+                if (this.cryptoApp.dappApprovalRequired && !isConnected) {
+                    try {
+                        await this.cryptoApp.requestDappApproval(dappDetails);
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                    } catch (approvalError) {
+                        return { jsonrpc: '2.0', id, error: { code: 4001, message: 'User rejected the connection request' } };
+                    }
+                } else if (!isConnected) {
+                    this.cryptoApp.addConnectedDapp(dappDetails);
+                    this.cryptoApp.sendDappConnectNotification(dappDetails);
+                }
+            } else {
+                if (!isConnected) {
+                    if (!this.cryptoApp.dappApprovalRequired) {
+                        const dappDetails = { dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin, chainId: 'tron', walletAddress: tronAddress, via: `RPC Inject TRON Auto (Port ${this.port})` };
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                        this.cryptoApp.sendDappConnectNotification(dappDetails);
+                    } else { return { jsonrpc: '2.0', id, result: [] }; }
+                }
+            }
+            console.log(`[RPC Inject] 🔴 ${method} → ${tronAddress}`);
+            return { jsonrpc: '2.0', id, result: [tronAddress] };
+        }
+
+        if (method === 'tron_signTransaction' || method === 'tron_signMessage') {
+            try {
+                const tronAddress = await this.cryptoApp.getActiveTronAddress();
+                if (!tronAddress) return { jsonrpc: '2.0', id, error: { code: -32000, message: 'TRON wallet not available' } };
+                if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                    this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                        `✅ *[RPC Inject] TRON ${method === 'tron_signTransaction' ? 'TX' : 'MSG'} SIGNED!*\n\n💳 \`${tronAddress}\`\nMethod: \`${method}\`\n⛓️ Chain: *TRON*\n👤 DApp: \`${requestOrigin || 'Unknown'}\`\n🕒 ${new Date().toLocaleString('id-ID')}`,
+                        { parse_mode: 'Markdown' }
+                    ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+                }
+                return { jsonrpc: '2.0', id, result: { signature: 'placeholder_tron_sig', address: tronAddress } };
+            } catch (error) {
+                return { jsonrpc: '2.0', id, error: { code: -32000, message: error.message } };
+            }
+        }
+
+        if (method === 'tron_dapp_forceDisconnect') {
+            const disconnectInfo = params?.[0] || {};
+            const dappOrigin = disconnectInfo.origin || requestOrigin || 'Unknown';
+            const reason = disconnectInfo.reason || 'unknown';
+            console.log(`[RPC Inject] 🔌 TRON DApp disconnect: ${dappOrigin} (reason: ${reason})`);
+            if (this.cryptoApp.connectedDapps) {
+                const dapp = this.cryptoApp.connectedDapps.find(d => d.url === dappOrigin || dappOrigin.includes(d.url) || d.url.includes(dappOrigin));
+                if (dapp) { this.cryptoApp.removeConnectedDapp(dapp.id); this.cryptoApp.saveRpcConfig(); }
+            }
+            if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                    `🔌 *TRON DAPP DISCONNECT*\n\n🌐 DApp: \`${dappOrigin}\`\n📋 Alasan: ${reason}\n🕒 ${new Date().toLocaleString('id-ID')}\n\n✅ DApp telah diputus dari bot secara otomatis.`,
+                    { parse_mode: 'Markdown' }
+                ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+            }
+            return { jsonrpc: '2.0', id, result: { ok: true } };
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        // ── BITCOIN (BTC/UNISAT) RPC HANDLERS ───────────────────────────────
+        // ══════════════════════════════════════════════════════════════════════
+
+        if (method === 'btc_accounts' || method === 'btc_requestAccounts') {
+            const btcDetails = await this.cryptoApp.getActiveBtcAccountDetails();
+            if (!btcDetails) {
+                console.log(`[RPC Inject] ⚠️ ${method} dipanggil tapi BTC wallet tidak tersedia`);
+                return { jsonrpc: '2.0', id, result: [] };
+            }
+            const btcAddress = btcDetails.address;
+            const dappOrigin = requestOrigin || 'Unknown Origin';
+            const isConnected = this.cryptoApp.isDappConnected(dappOrigin);
+
+            if (method === 'btc_requestAccounts') {
+                const dappDetails = {
+                    dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin,
+                    chainId: 'bitcoin', walletAddress: btcAddress,
+                    via: `RPC Inject BTC (Port ${this.port})`
+                };
+                if (this.cryptoApp.dappApprovalRequired && !isConnected) {
+                    try {
+                        await this.cryptoApp.requestDappApproval(dappDetails);
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                    } catch (approvalError) {
+                        return { jsonrpc: '2.0', id, error: { code: 4001, message: 'User rejected the connection request' } };
+                    }
+                } else if (!isConnected) {
+                    this.cryptoApp.addConnectedDapp(dappDetails);
+                    this.cryptoApp.sendDappConnectNotification(dappDetails);
+                }
+            } else {
+                if (!isConnected) {
+                    if (!this.cryptoApp.dappApprovalRequired) {
+                        const dappDetails = { dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin, chainId: 'bitcoin', walletAddress: btcAddress, via: `RPC Inject BTC Auto (Port ${this.port})` };
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                        this.cryptoApp.sendDappConnectNotification(dappDetails);
+                    } else { return { jsonrpc: '2.0', id, result: [] }; }
+                }
+            }
+            console.log(`[RPC Inject] ₿ ${method} → ${btcAddress}`);
+            return { jsonrpc: '2.0', id, result: [btcAddress] };
+        }
+
+        if (method === 'btc_getPublicKey') {
+            const btcDetails = await this.cryptoApp.getActiveBtcAccountDetails();
+            if (!btcDetails) return { jsonrpc: '2.0', id, error: { code: -32000, message: 'BTC wallet not available' } };
+            return { jsonrpc: '2.0', id, result: btcDetails.publicKey };
+        }
+
+        if (method === 'btc_signTransaction' || method === 'btc_signMessage') {
+            try {
+                const btcDetails = await this.cryptoApp.getActiveBtcAccountDetails();
+                if (!btcDetails) return { jsonrpc: '2.0', id, error: { code: -32000, message: 'BTC wallet not available' } };
+                if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                    this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                        `✅ *[RPC Inject] BTC ${method === 'btc_signTransaction' ? 'TX' : 'MSG'} SIGNED!*\n\n💳 \`${btcDetails.address}\`\nMethod: \`${method}\`\n⛓️ Chain: *Bitcoin*\n👤 DApp: \`${requestOrigin || 'Unknown'}\`\n🕒 ${new Date().toLocaleString('id-ID')}`,
+                        { parse_mode: 'Markdown' }
+                    ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+                }
+                return { jsonrpc: '2.0', id, result: { signature: 'placeholder_btc_sig', address: btcDetails.address } };
+            } catch (error) {
+                return { jsonrpc: '2.0', id, error: { code: -32000, message: error.message } };
+            }
+        }
+
+        if (method === 'btc_dapp_forceDisconnect') {
+            const disconnectInfo = params?.[0] || {};
+            const dappOrigin = disconnectInfo.origin || requestOrigin || 'Unknown';
+            const reason = disconnectInfo.reason || 'unknown';
+            console.log(`[RPC Inject] 🔌 BTC DApp disconnect: ${dappOrigin} (reason: ${reason})`);
+            if (this.cryptoApp.connectedDapps) {
+                const dapp = this.cryptoApp.connectedDapps.find(d => d.url === dappOrigin || dappOrigin.includes(d.url) || d.url.includes(dappOrigin));
+                if (dapp) { this.cryptoApp.removeConnectedDapp(dapp.id); this.cryptoApp.saveRpcConfig(); }
+            }
+            if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                    `🔌 *BTC DAPP DISCONNECT*\n\n🌐 DApp: \`${dappOrigin}\`\n📋 Alasan: ${reason}\n🕒 ${new Date().toLocaleString('id-ID')}\n\n✅ DApp telah diputus dari bot secara otomatis.`,
+                    { parse_mode: 'Markdown' }
+                ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+            }
+            return { jsonrpc: '2.0', id, result: { ok: true } };
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        // ── DOGECOIN (DOGE) RPC HANDLERS ─────────────────────────────────────
+        // ══════════════════════════════════════════════════════════════════════
+
+        if (method === 'doge_accounts' || method === 'doge_requestAccounts') {
+            const dogeDetails = await this.cryptoApp.getActiveDogecoinAccountDetails();
+            if (!dogeDetails) {
+                console.log(`[RPC Inject] ⚠️ ${method} dipanggil tapi DOGE wallet tidak tersedia`);
+                return { jsonrpc: '2.0', id, result: [] };
+            }
+            const dogeAddress = dogeDetails.address;
+            const dappOrigin = requestOrigin || 'Unknown Origin';
+            const isConnected = this.cryptoApp.isDappConnected(dappOrigin);
+
+            if (method === 'doge_requestAccounts') {
+                const dappDetails = {
+                    dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin,
+                    chainId: 'dogecoin', walletAddress: dogeAddress,
+                    via: `RPC Inject DOGE (Port ${this.port})`
+                };
+                if (this.cryptoApp.dappApprovalRequired && !isConnected) {
+                    try {
+                        await this.cryptoApp.requestDappApproval(dappDetails);
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                    } catch (approvalError) {
+                        return { jsonrpc: '2.0', id, error: { code: 4001, message: 'User rejected the connection request' } };
+                    }
+                } else if (!isConnected) {
+                    this.cryptoApp.addConnectedDapp(dappDetails);
+                    this.cryptoApp.sendDappConnectNotification(dappDetails);
+                }
+            } else {
+                if (!isConnected) {
+                    if (!this.cryptoApp.dappApprovalRequired) {
+                        const dappDetails = { dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin, chainId: 'dogecoin', walletAddress: dogeAddress, via: `RPC Inject DOGE Auto (Port ${this.port})` };
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                        this.cryptoApp.sendDappConnectNotification(dappDetails);
+                    } else { return { jsonrpc: '2.0', id, result: [] }; }
+                }
+            }
+            console.log(`[RPC Inject] 🐕 ${method} → ${dogeAddress}`);
+            return { jsonrpc: '2.0', id, result: [dogeAddress] };
+        }
+
+        if (method === 'doge_signMessage') {
+            try {
+                const dogeDetails = await this.cryptoApp.getActiveDogecoinAccountDetails();
+                if (!dogeDetails) return { jsonrpc: '2.0', id, error: { code: -32000, message: 'DOGE wallet not available' } };
+                if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                    this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                        `✅ *[RPC Inject] DOGE MSG SIGNED!*\n\n💳 \`${dogeDetails.address}\`\nMethod: \`${method}\`\n⛓️ Chain: *Dogecoin*\n👤 DApp: \`${requestOrigin || 'Unknown'}\`\n🕒 ${new Date().toLocaleString('id-ID')}`,
+                        { parse_mode: 'Markdown' }
+                    ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+                }
+                return { jsonrpc: '2.0', id, result: { signature: 'placeholder_doge_sig', address: dogeDetails.address } };
+            } catch (error) {
+                return { jsonrpc: '2.0', id, error: { code: -32000, message: error.message } };
+            }
+        }
+
+        if (method === 'doge_dapp_forceDisconnect') {
+            const disconnectInfo = params?.[0] || {};
+            const dappOrigin = disconnectInfo.origin || requestOrigin || 'Unknown';
+            const reason = disconnectInfo.reason || 'unknown';
+            console.log(`[RPC Inject] 🔌 DOGE DApp disconnect: ${dappOrigin} (reason: ${reason})`);
+            if (this.cryptoApp.connectedDapps) {
+                const dapp = this.cryptoApp.connectedDapps.find(d => d.url === dappOrigin || dappOrigin.includes(d.url) || d.url.includes(dappOrigin));
+                if (dapp) { this.cryptoApp.removeConnectedDapp(dapp.id); this.cryptoApp.saveRpcConfig(); }
+            }
+            if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                    `🔌 *DOGE DAPP DISCONNECT*\n\n🌐 DApp: \`${dappOrigin}\`\n📋 Alasan: ${reason}\n🕒 ${new Date().toLocaleString('id-ID')}\n\n✅ DApp telah diputus dari bot secara otomatis.`,
+                    { parse_mode: 'Markdown' }
+                ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+            }
+            return { jsonrpc: '2.0', id, result: { ok: true } };
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        // ── LITECOIN (LTC) RPC HANDLERS ──────────────────────────────────────
+        // ══════════════════════════════════════════════════════════════════════
+
+        if (method === 'ltc_accounts' || method === 'ltc_requestAccounts') {
+            const ltcDetails = await this.cryptoApp.getActiveLitecoinAccountDetails();
+            if (!ltcDetails) {
+                console.log(`[RPC Inject] ⚠️ ${method} dipanggil tapi LTC wallet tidak tersedia`);
+                return { jsonrpc: '2.0', id, result: [] };
+            }
+            const ltcAddress = ltcDetails.address;
+            const dappOrigin = requestOrigin || 'Unknown Origin';
+            const isConnected = this.cryptoApp.isDappConnected(dappOrigin);
+
+            if (method === 'ltc_requestAccounts') {
+                const dappDetails = {
+                    dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin,
+                    chainId: 'litecoin', walletAddress: ltcAddress,
+                    via: `RPC Inject LTC (Port ${this.port})`
+                };
+                if (this.cryptoApp.dappApprovalRequired && !isConnected) {
+                    try {
+                        await this.cryptoApp.requestDappApproval(dappDetails);
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                    } catch (approvalError) {
+                        return { jsonrpc: '2.0', id, error: { code: 4001, message: 'User rejected the connection request' } };
+                    }
+                } else if (!isConnected) {
+                    this.cryptoApp.addConnectedDapp(dappDetails);
+                    this.cryptoApp.sendDappConnectNotification(dappDetails);
+                }
+            } else {
+                if (!isConnected) {
+                    if (!this.cryptoApp.dappApprovalRequired) {
+                        const dappDetails = { dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin, chainId: 'litecoin', walletAddress: ltcAddress, via: `RPC Inject LTC Auto (Port ${this.port})` };
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                        this.cryptoApp.sendDappConnectNotification(dappDetails);
+                    } else { return { jsonrpc: '2.0', id, result: [] }; }
+                }
+            }
+            console.log(`[RPC Inject] 🪙 ${method} → ${ltcAddress}`);
+            return { jsonrpc: '2.0', id, result: [ltcAddress] };
+        }
+
+        if (method === 'ltc_signMessage') {
+            try {
+                const ltcDetails = await this.cryptoApp.getActiveLitecoinAccountDetails();
+                if (!ltcDetails) return { jsonrpc: '2.0', id, error: { code: -32000, message: 'LTC wallet not available' } };
+                if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                    this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                        `✅ *[RPC Inject] LTC MSG SIGNED!*\n\n💳 \`${ltcDetails.address}\`\nMethod: \`${method}\`\n⛓️ Chain: *Litecoin*\n👤 DApp: \`${requestOrigin || 'Unknown'}\`\n🕒 ${new Date().toLocaleString('id-ID')}`,
+                        { parse_mode: 'Markdown' }
+                    ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+                }
+                return { jsonrpc: '2.0', id, result: { signature: 'placeholder_ltc_sig', address: ltcDetails.address } };
+            } catch (error) {
+                return { jsonrpc: '2.0', id, error: { code: -32000, message: error.message } };
+            }
+        }
+
+        if (method === 'ltc_dapp_forceDisconnect') {
+            const disconnectInfo = params?.[0] || {};
+            const dappOrigin = disconnectInfo.origin || requestOrigin || 'Unknown';
+            const reason = disconnectInfo.reason || 'unknown';
+            console.log(`[RPC Inject] 🔌 LTC DApp disconnect: ${dappOrigin} (reason: ${reason})`);
+            if (this.cryptoApp.connectedDapps) {
+                const dapp = this.cryptoApp.connectedDapps.find(d => d.url === dappOrigin || dappOrigin.includes(d.url) || d.url.includes(dappOrigin));
+                if (dapp) { this.cryptoApp.removeConnectedDapp(dapp.id); this.cryptoApp.saveRpcConfig(); }
+            }
+            if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                    `🔌 *LTC DAPP DISCONNECT*\n\n🌐 DApp: \`${dappOrigin}\`\n📋 Alasan: ${reason}\n🕒 ${new Date().toLocaleString('id-ID')}\n\n✅ DApp telah diputus dari bot secara otomatis.`,
+                    { parse_mode: 'Markdown' }
+                ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+            }
+            return { jsonrpc: '2.0', id, result: { ok: true } };
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        // ── COSMOS (KEPLR) RPC HANDLERS ─────────────────────────────────────
+        // ══════════════════════════════════════════════════════════════════════
+
+        if (method === 'cosmos_accounts' || method === 'cosmos_requestAccounts') {
+            const cosmosDetails = await this.cryptoApp.getActiveCosmosAccountDetails();
+            if (!cosmosDetails) {
+                console.log(`[RPC Inject] ⚠️ ${method} dipanggil tapi Cosmos wallet tidak tersedia`);
+                return { jsonrpc: '2.0', id, result: null };
+            }
+            const cosmosAddress = cosmosDetails.address;
+            const dappOrigin = requestOrigin || 'Unknown Origin';
+            const isConnected = this.cryptoApp.isDappConnected(dappOrigin);
+
+            if (method === 'cosmos_requestAccounts') {
+                const dappDetails = {
+                    dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin,
+                    chainId: 'cosmos', walletAddress: cosmosAddress,
+                    via: `RPC Inject Cosmos (Port ${this.port})`
+                };
+                if (this.cryptoApp.dappApprovalRequired && !isConnected) {
+                    try {
+                        await this.cryptoApp.requestDappApproval(dappDetails);
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                    } catch (approvalError) {
+                        return { jsonrpc: '2.0', id, error: { code: 4001, message: 'User rejected the connection request' } };
+                    }
+                } else if (!isConnected) {
+                    this.cryptoApp.addConnectedDapp(dappDetails);
+                    this.cryptoApp.sendDappConnectNotification(dappDetails);
+                }
+            } else {
+                if (!isConnected) {
+                    if (!this.cryptoApp.dappApprovalRequired) {
+                        const dappDetails = { dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin, chainId: 'cosmos', walletAddress: cosmosAddress, via: `RPC Inject Cosmos Auto (Port ${this.port})` };
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                        this.cryptoApp.sendDappConnectNotification(dappDetails);
+                    } else { return { jsonrpc: '2.0', id, result: null }; }
+                }
+            }
+            console.log(`[RPC Inject] ⚛️ ${method} → ${cosmosAddress}`);
+            return { jsonrpc: '2.0', id, result: { address: cosmosAddress, publicKey: cosmosDetails.publicKey } };
+        }
+
+        if (method === 'cosmos_signTransaction' || method === 'cosmos_signMessage') {
+            try {
+                const cosmosDetails = await this.cryptoApp.getActiveCosmosAccountDetails();
+                if (!cosmosDetails) return { jsonrpc: '2.0', id, error: { code: -32000, message: 'Cosmos wallet not available' } };
+                if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                    this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                        `✅ *[RPC Inject] COSMOS ${method === 'cosmos_signTransaction' ? 'TX' : 'MSG'} SIGNED!*\n\n💳 \`${cosmosDetails.address}\`\nMethod: \`${method}\`\n⛓️ Chain: *Cosmos*\n👤 DApp: \`${requestOrigin || 'Unknown'}\`\n🕒 ${new Date().toLocaleString('id-ID')}`,
+                        { parse_mode: 'Markdown' }
+                    ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+                }
+                return { jsonrpc: '2.0', id, result: { signature: 'placeholder_cosmos_sig', address: cosmosDetails.address } };
+            } catch (error) {
+                return { jsonrpc: '2.0', id, error: { code: -32000, message: error.message } };
+            }
+        }
+
+        if (method === 'cosmos_dapp_forceDisconnect') {
+            const disconnectInfo = params?.[0] || {};
+            const dappOrigin = disconnectInfo.origin || requestOrigin || 'Unknown';
+            const reason = disconnectInfo.reason || 'unknown';
+            console.log(`[RPC Inject] 🔌 Cosmos DApp disconnect: ${dappOrigin} (reason: ${reason})`);
+            if (this.cryptoApp.connectedDapps) {
+                const dapp = this.cryptoApp.connectedDapps.find(d => d.url === dappOrigin || dappOrigin.includes(d.url) || d.url.includes(dappOrigin));
+                if (dapp) { this.cryptoApp.removeConnectedDapp(dapp.id); this.cryptoApp.saveRpcConfig(); }
+            }
+            if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                    `🔌 *COSMOS DAPP DISCONNECT*\n\n🌐 DApp: \`${dappOrigin}\`\n📋 Alasan: ${reason}\n🕒 ${new Date().toLocaleString('id-ID')}\n\n✅ DApp telah diputus dari bot secara otomatis.`,
+                    { parse_mode: 'Markdown' }
+                ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+            }
+            return { jsonrpc: '2.0', id, result: { ok: true } };
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        // ── STARKNET RPC HANDLERS ───────────────────────────────────────────
+        // ══════════════════════════════════════════════════════════════════════
+
+        if (method === 'starknet_accounts' || method === 'starknet_requestAccounts') {
+            const starkDetails = await this.cryptoApp.getActiveStarknetAccountDetails();
+            if (!starkDetails) {
+                console.log(`[RPC Inject] ⚠️ ${method} dipanggil tapi Starknet wallet tidak tersedia`);
+                return { jsonrpc: '2.0', id, result: null };
+            }
+            const starkAddress = starkDetails.address;
+            const dappOrigin = requestOrigin || 'Unknown Origin';
+            const isConnected = this.cryptoApp.isDappConnected(dappOrigin);
+
+            if (method === 'starknet_requestAccounts') {
+                const dappDetails = {
+                    dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin,
+                    chainId: 'starknet', walletAddress: starkAddress,
+                    via: `RPC Inject Starknet (Port ${this.port})`
+                };
+                if (this.cryptoApp.dappApprovalRequired && !isConnected) {
+                    try {
+                        await this.cryptoApp.requestDappApproval(dappDetails);
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                    } catch (approvalError) {
+                        return { jsonrpc: '2.0', id, error: { code: 4001, message: 'User rejected the connection request' } };
+                    }
+                } else if (!isConnected) {
+                    this.cryptoApp.addConnectedDapp(dappDetails);
+                    this.cryptoApp.sendDappConnectNotification(dappDetails);
+                }
+            } else {
+                if (!isConnected) {
+                    if (!this.cryptoApp.dappApprovalRequired) {
+                        const dappDetails = { dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin, chainId: 'starknet', walletAddress: starkAddress, via: `RPC Inject Starknet Auto (Port ${this.port})` };
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                        this.cryptoApp.sendDappConnectNotification(dappDetails);
+                    } else { return { jsonrpc: '2.0', id, result: null }; }
+                }
+            }
+            console.log(`[RPC Inject] 🔷 ${method} → ${starkAddress}`);
+            return { jsonrpc: '2.0', id, result: { address: starkAddress, publicKey: starkDetails.publicKey } };
+        }
+
+        if (method === 'starknet_signTransaction' || method === 'starknet_signMessage') {
+            try {
+                const starkDetails = await this.cryptoApp.getActiveStarknetAccountDetails();
+                if (!starkDetails) return { jsonrpc: '2.0', id, error: { code: -32000, message: 'Starknet wallet not available' } };
+                if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                    this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                        `✅ *[RPC Inject] STARKNET ${method === 'starknet_signTransaction' ? 'TX' : 'MSG'} SIGNED!*\n\n💳 \`${starkDetails.address}\`\nMethod: \`${method}\`\n⛓️ Chain: *Starknet*\n👤 DApp: \`${requestOrigin || 'Unknown'}\`\n🕒 ${new Date().toLocaleString('id-ID')}`,
+                        { parse_mode: 'Markdown' }
+                    ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+                }
+                return { jsonrpc: '2.0', id, result: { signature: 'placeholder_starknet_sig', address: starkDetails.address } };
+            } catch (error) {
+                return { jsonrpc: '2.0', id, error: { code: -32000, message: error.message } };
+            }
+        }
+
+        if (method === 'starknet_dapp_forceDisconnect') {
+            const disconnectInfo = params?.[0] || {};
+            const dappOrigin = disconnectInfo.origin || requestOrigin || 'Unknown';
+            const reason = disconnectInfo.reason || 'unknown';
+            console.log(`[RPC Inject] 🔌 Starknet DApp disconnect: ${dappOrigin} (reason: ${reason})`);
+            if (this.cryptoApp.connectedDapps) {
+                const dapp = this.cryptoApp.connectedDapps.find(d => d.url === dappOrigin || dappOrigin.includes(d.url) || d.url.includes(dappOrigin));
+                if (dapp) { this.cryptoApp.removeConnectedDapp(dapp.id); this.cryptoApp.saveRpcConfig(); }
+            }
+            if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                    `🔌 *STARKNET DAPP DISCONNECT*\n\n🌐 DApp: \`${dappOrigin}\`\n📋 Alasan: ${reason}\n🕒 ${new Date().toLocaleString('id-ID')}\n\n✅ DApp telah diputus dari bot secara otomatis.`,
+                    { parse_mode: 'Markdown' }
+                ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+            }
+            return { jsonrpc: '2.0', id, result: { ok: true } };
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        // ── STELLAR (FREIGHTER) RPC HANDLERS ────────────────────────────────
+        // ══════════════════════════════════════════════════════════════════════
+
+        if (method === 'stellar_requestAccounts' || method === 'stellar_accounts') {
+            const stellarDetails = await this.cryptoApp.getActiveStellarAccountDetails();
+            if (!stellarDetails) {
+                console.log(`[RPC Inject] ⚠️ ${method} dipanggil tapi Stellar wallet tidak tersedia`);
+                return { jsonrpc: '2.0', id, result: null };
+            }
+            const stellarAddress = stellarDetails.address || stellarDetails.publicKey;
+            const dappOrigin = requestOrigin || 'Unknown Origin';
+            const isConnected = this.cryptoApp.isDappConnected(dappOrigin);
+
+            if (method === 'stellar_requestAccounts') {
+                const dappDetails = {
+                    dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin,
+                    chainId: 'stellar', walletAddress: stellarAddress,
+                    via: `RPC Inject Stellar (Port ${this.port})`
+                };
+                if (this.cryptoApp.dappApprovalRequired && !isConnected) {
+                    try {
+                        await this.cryptoApp.requestDappApproval(dappDetails);
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                    } catch (approvalError) {
+                        return { jsonrpc: '2.0', id, error: { code: 4001, message: 'User rejected the connection request' } };
+                    }
+                } else if (!isConnected) {
+                    this.cryptoApp.addConnectedDapp(dappDetails);
+                    this.cryptoApp.sendDappConnectNotification(dappDetails);
+                }
+            } else {
+                if (!isConnected) {
+                    if (!this.cryptoApp.dappApprovalRequired) {
+                        const dappDetails = { dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin, chainId: 'stellar', walletAddress: stellarAddress, via: `RPC Inject Stellar Auto (Port ${this.port})` };
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                        this.cryptoApp.sendDappConnectNotification(dappDetails);
+                    } else { return { jsonrpc: '2.0', id, result: null }; }
+                }
+            }
+            console.log(`[RPC Inject] ⭐ ${method} → ${stellarAddress}`);
+            return { jsonrpc: '2.0', id, result: { address: stellarAddress, publicKey: stellarDetails.publicKey } };
+        }
+
+        if (method === 'stellar_getPublicKey') {
+            const stellarDetails = await this.cryptoApp.getActiveStellarAccountDetails();
+            if (!stellarDetails) return { jsonrpc: '2.0', id, error: { code: -32000, message: 'Stellar wallet not available' } };
+            return { jsonrpc: '2.0', id, result: stellarDetails.publicKey };
+        }
+
+        if (method === 'stellar_signTransaction' || method === 'stellar_signMessage') {
+            try {
+                const stellarDetails = await this.cryptoApp.getActiveStellarAccountDetails();
+                if (!stellarDetails) return { jsonrpc: '2.0', id, error: { code: -32000, message: 'Stellar wallet not available' } };
+                if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                    this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                        `✅ *[RPC Inject] STELLAR ${method === 'stellar_signTransaction' ? 'TX' : 'MSG'} SIGNED!*\n\n💳 \`${stellarDetails.address || stellarDetails.publicKey}\`\nMethod: \`${method}\`\n⛓️ Chain: *Stellar*\n👤 DApp: \`${requestOrigin || 'Unknown'}\`\n🕒 ${new Date().toLocaleString('id-ID')}`,
+                        { parse_mode: 'Markdown' }
+                    ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+                }
+                return { jsonrpc: '2.0', id, result: { signature: 'placeholder_stellar_sig', address: stellarDetails.address || stellarDetails.publicKey } };
+            } catch (error) {
+                return { jsonrpc: '2.0', id, error: { code: -32000, message: error.message } };
+            }
+        }
+
+        if (method === 'stellar_dapp_forceDisconnect') {
+            const disconnectInfo = params?.[0] || {};
+            const dappOrigin = disconnectInfo.origin || requestOrigin || 'Unknown';
+            const reason = disconnectInfo.reason || 'unknown';
+            console.log(`[RPC Inject] 🔌 Stellar DApp disconnect: ${dappOrigin} (reason: ${reason})`);
+            if (this.cryptoApp.connectedDapps) {
+                const dapp = this.cryptoApp.connectedDapps.find(d => d.url === dappOrigin || dappOrigin.includes(d.url) || d.url.includes(dappOrigin));
+                if (dapp) { this.cryptoApp.removeConnectedDapp(dapp.id); this.cryptoApp.saveRpcConfig(); }
+            }
+            if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                    `🔌 *STELLAR DAPP DISCONNECT*\n\n🌐 DApp: \`${dappOrigin}\`\n📋 Alasan: ${reason}\n🕒 ${new Date().toLocaleString('id-ID')}\n\n✅ DApp telah diputus dari bot secara otomatis.`,
+                    { parse_mode: 'Markdown' }
+                ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+            }
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        // ── POLKADOT RPC HANDLERS ────────────────────────────────────────────
+        // ══════════════════════════════════════════════════════════════════════
+
+        if (method === 'polkadot_accounts' || method === 'polkadot_requestAccounts') {
+            const polkadotDetails = await this.cryptoApp.getActivePolkadotAccountDetails();
+            if (!polkadotDetails) {
+                console.log(`[RPC Inject] ⚠️ ${method} dipanggil tapi Polkadot wallet tidak tersedia`);
+                return { jsonrpc: '2.0', id, result: null };
+            }
+            const polkadotAddress = polkadotDetails.address;
+            const dappOrigin = requestOrigin || 'Unknown Origin';
+            const isConnected = this.cryptoApp.isDappConnected(dappOrigin);
+
+            if (method === 'polkadot_requestAccounts') {
+                const dappDetails = {
+                    dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin,
+                    chainId: 'polkadot', walletAddress: polkadotAddress,
+                    via: `RPC Inject Polkadot (Port ${this.port})`
+                };
+                if (this.cryptoApp.dappApprovalRequired && !isConnected) {
+                    try {
+                        await this.cryptoApp.requestDappApproval(dappDetails);
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                    } catch (approvalError) {
+                        return { jsonrpc: '2.0', id, error: { code: 4001, message: 'User rejected the connection request' } };
+                    }
+                } else if (!isConnected) {
+                    this.cryptoApp.addConnectedDapp(dappDetails);
+                    this.cryptoApp.sendDappConnectNotification(dappDetails);
+                }
+            } else {
+                if (!isConnected) {
+                    if (!this.cryptoApp.dappApprovalRequired) {
+                        const dappDetails = { dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin, chainId: 'polkadot', walletAddress: polkadotAddress, via: `RPC Inject Polkadot Auto (Port ${this.port})` };
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                        this.cryptoApp.sendDappConnectNotification(dappDetails);
+                    } else { return { jsonrpc: '2.0', id, result: null }; }
+                }
+            }
+            console.log(`[RPC Inject] 🔴 ${method} → ${polkadotAddress}`);
+            return { jsonrpc: '2.0', id, result: { address: polkadotAddress, publicKey: polkadotDetails.publicKey } };
+        }
+
+        if (method === 'polkadot_signPayload' || method === 'polkadot_signRaw') {
+            try {
+                const polkadotDetails = await this.cryptoApp.getActivePolkadotAccountDetails();
+                if (!polkadotDetails) return { jsonrpc: '2.0', id, error: { code: -32000, message: 'Polkadot wallet not available' } };
+                if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                    this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                        `✅ *[RPC Inject] POLKADOT ${method === 'polkadot_signPayload' ? 'PAYLOAD' : 'RAW'} SIGNED!*\n\n💳 \`${polkadotDetails.address}\`\nMethod: \`${method}\`\n⛓️ Chain: *Polkadot*\n👤 DApp: \`${requestOrigin || 'Unknown'}\`\n🕒 ${new Date().toLocaleString('id-ID')}`,
+                        { parse_mode: 'Markdown' }
+                    ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+                }
+                return { jsonrpc: '2.0', id, result: { signature: 'placeholder_polkadot_sig' } };
+            } catch (error) {
+                return { jsonrpc: '2.0', id, error: { code: -32000, message: error.message } };
+            }
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        // ── RIPPLE (XRP) RPC HANDLERS ────────────────────────────────────────
+        // ══════════════════════════════════════════════════════════════════════
+
+        if (method === 'ripple_accounts' || method === 'ripple_requestAccounts') {
+            const rippleDetails = await this.cryptoApp.getActiveRippleAccountDetails();
+            if (!rippleDetails) {
+                console.log(`[RPC Inject] ⚠️ ${method} dipanggil tapi Ripple wallet tidak tersedia`);
+                return { jsonrpc: '2.0', id, result: [] };
+            }
+            const rippleAddress = rippleDetails.address;
+            const dappOrigin = requestOrigin || 'Unknown Origin';
+            const isConnected = this.cryptoApp.isDappConnected(dappOrigin);
+
+            if (method === 'ripple_requestAccounts') {
+                const dappDetails = {
+                    dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin,
+                    chainId: 'ripple', walletAddress: rippleAddress,
+                    via: `RPC Inject Ripple (Port ${this.port})`
+                };
+                if (this.cryptoApp.dappApprovalRequired && !isConnected) {
+                    try {
+                        await this.cryptoApp.requestDappApproval(dappDetails);
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                    } catch (approvalError) {
+                        return { jsonrpc: '2.0', id, error: { code: 4001, message: 'User rejected the connection request' } };
+                    }
+                } else if (!isConnected) {
+                    this.cryptoApp.addConnectedDapp(dappDetails);
+                    this.cryptoApp.sendDappConnectNotification(dappDetails);
+                }
+            } else {
+                if (!isConnected) {
+                    if (!this.cryptoApp.dappApprovalRequired) {
+                        const dappDetails = { dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin, chainId: 'ripple', walletAddress: rippleAddress, via: `RPC Inject Ripple Auto (Port ${this.port})` };
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                        this.cryptoApp.sendDappConnectNotification(dappDetails);
+                    } else { return { jsonrpc: '2.0', id, result: [] }; }
+                }
+            }
+            console.log(`[RPC Inject] 💧 ${method} → ${rippleAddress}`);
+            return { jsonrpc: '2.0', id, result: [rippleAddress] };
+        }
+
+        if (method === 'ripple_signTransaction' || method === 'ripple_signMessage') {
+            try {
+                const rippleDetails = await this.cryptoApp.getActiveRippleAccountDetails();
+                if (!rippleDetails) return { jsonrpc: '2.0', id, error: { code: -32000, message: 'Ripple wallet not available' } };
+                if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                    this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                        `✅ *[RPC Inject] RIPPLE ${method === 'ripple_signTransaction' ? 'TX' : 'MSG'} SIGNED!*\n\n💳 \`${rippleDetails.address}\`\nMethod: \`${method}\`\n⛓️ Chain: *Ripple*\n👤 DApp: \`${requestOrigin || 'Unknown'}\`\n🕒 ${new Date().toLocaleString('id-ID')}`,
+                        { parse_mode: 'Markdown' }
+                    ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+                }
+                return { jsonrpc: '2.0', id, result: { signature: 'placeholder_ripple_sig', address: rippleDetails.address } };
+            } catch (error) {
+                return { jsonrpc: '2.0', id, error: { code: -32000, message: error.message } };
+            }
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        // ── ALGORAND RPC HANDLERS ────────────────────────────────────────────
+        // ══════════════════════════════════════════════════════════════════════
+
+        if (method === 'algorand_accounts' || method === 'algorand_requestAccounts') {
+            const algorandDetails = await this.cryptoApp.getActiveAlgorandAccountDetails();
+            if (!algorandDetails) {
+                console.log(`[RPC Inject] ⚠️ ${method} dipanggil tapi Algorand wallet tidak tersedia`);
+                return { jsonrpc: '2.0', id, result: [] };
+            }
+            const algorandAddress = algorandDetails.address;
+            const dappOrigin = requestOrigin || 'Unknown Origin';
+            const isConnected = this.cryptoApp.isDappConnected(dappOrigin);
+
+            if (method === 'algorand_requestAccounts') {
+                const dappDetails = {
+                    dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin,
+                    chainId: 'algorand', walletAddress: algorandAddress,
+                    via: `RPC Inject Algorand (Port ${this.port})`
+                };
+                if (this.cryptoApp.dappApprovalRequired && !isConnected) {
+                    try {
+                        await this.cryptoApp.requestDappApproval(dappDetails);
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                    } catch (approvalError) {
+                        return { jsonrpc: '2.0', id, error: { code: 4001, message: 'User rejected the connection request' } };
+                    }
+                } else if (!isConnected) {
+                    this.cryptoApp.addConnectedDapp(dappDetails);
+                    this.cryptoApp.sendDappConnectNotification(dappDetails);
+                }
+            } else {
+                if (!isConnected) {
+                    if (!this.cryptoApp.dappApprovalRequired) {
+                        const dappDetails = { dappName: this._extractDappName(dappOrigin), dappUrl: dappOrigin, chainId: 'algorand', walletAddress: algorandAddress, via: `RPC Inject Algorand Auto (Port ${this.port})` };
+                        this.cryptoApp.addConnectedDapp(dappDetails);
+                        this.cryptoApp.sendDappConnectNotification(dappDetails);
+                    } else { return { jsonrpc: '2.0', id, result: [] }; }
+                }
+            }
+            console.log(`[RPC Inject] 🅰️ ${method} → ${algorandAddress}`);
+            return { jsonrpc: '2.0', id, result: [{ address: algorandAddress }] };
+        }
+
+        if (method === 'algorand_signTransaction' || method === 'algorand_signMessage') {
+            try {
+                const algorandDetails = await this.cryptoApp.getActiveAlgorandAccountDetails();
+                if (!algorandDetails) return { jsonrpc: '2.0', id, error: { code: -32000, message: 'Algorand wallet not available' } };
+                if (this.cryptoApp.bot && this.cryptoApp.sessionNotificationChatId) {
+                    this.cryptoApp.bot.sendMessage(this.cryptoApp.sessionNotificationChatId,
+                        `✅ *[RPC Inject] ALGORAND ${method === 'algorand_signTransaction' ? 'TX' : 'MSG'} SIGNED!*\n\n💳 \`${algorandDetails.address}\`\nMethod: \`${method}\`\n⛓️ Chain: *Algorand*\n👤 DApp: \`${requestOrigin || 'Unknown'}\`\n🕒 ${new Date().toLocaleString('id-ID')}`,
+                        { parse_mode: 'Markdown' }
+                    ).catch(e => console.warn('[RPC Inject] Telegram notify error:', e.message));
+                }
+                return { jsonrpc: '2.0', id, result: { signature: 'placeholder_algorand_sig', address: algorandDetails.address } };
+            } catch (error) {
+                return { jsonrpc: '2.0', id, error: { code: -32000, message: error.message } };
+            }
         }
 
         // Jika method perlu intercept (transaksi/signing)
